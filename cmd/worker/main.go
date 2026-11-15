@@ -1,0 +1,69 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/boscostix/JobFlow/internal/config"
+	"github.com/boscostix/JobFlow/internal/store"
+	"github.com/boscostix/JobFlow/internal/tasks"
+	"github.com/boscostix/JobFlow/internal/worker"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+func main() {
+	if err := run(); err != nil {
+		slog.Error("worker stopped", "error", err)
+		os.Exit(1)
+	}
+}
+func run() error {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	url, err := config.DatabaseURL()
+	if err != nil {
+		return err
+	}
+	poll, err := config.Duration("WORKER_POLL_INTERVAL", 250*time.Millisecond)
+	if err != nil {
+		return err
+	}
+	grace, err := config.Duration("WORKER_SHUTDOWN_TIMEOUT", 10*time.Second)
+	if err != nil {
+		return err
+	}
+	pool, err := pgxpool.New(context.Background(), url)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	w := worker.Worker{Store: store.New(pool), Registry: tasks.DefaultRegistry(), Log: logger, PollInterval: poll}
+	return runWorker(ctx, grace, w.Run, pool.Close)
+}
+
+// Only close the pool after the worker has returned its connections. On timeout,
+// main exits the process; pool.Close would wait for the very work we timed out.
+func runWorker(ctx context.Context, grace time.Duration, run func(context.Context) error, closePool func()) error {
+	done := make(chan error, 1)
+	go func() { done <- run(ctx) }()
+	select {
+	case err := <-done:
+		closePool()
+		return err
+	case <-ctx.Done():
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case err := <-done:
+			closePool()
+			return err
+		case <-timer.C:
+			return fmt.Errorf("shutdown exceeded %s; in-flight job may remain RUNNING", grace)
+		}
+	}
+}
