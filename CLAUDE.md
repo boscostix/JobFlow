@@ -6,7 +6,7 @@ JobFlow is a Go distributed job execution platform. Its core objective is durabl
 
 Read [README.md](README.md) for the MVP scope, planned API, data model, directory layout, roadmap, and definition of done. These documents summarize the supplied *JobFlow - Complete MVP Specification*.
 
-The repository is currently at the specification stage. No application, build configuration, migrations, or tests exist yet. Treat documented capabilities as planned until implemented. Do not claim benchmark targets as measured performance or invent working setup commands.
+Milestone 1 is implemented: `cmd/api`, `cmd/worker`, PostgreSQL migrations, sqlc queries, Docker Compose, and unit/integration tests exist. Only `add_numbers`, submit/get/health, and the single-slot lifecycle are implemented. Lease recovery, fencing, retries, and the rest of the MVP remain planned. A hard crash or failed outcome write may strand `RUNNING` jobs. Do not claim benchmark targets as measured performance. Follow [AGENTS.md](AGENTS.md) for bounded implementation and review.
 
 ## Architecture and stack
 
@@ -90,7 +90,7 @@ Validate the complete Docker Compose scenario with five workers, terminate two d
 
 Measure queue latency, throughput, retry rates, recovery time, and scaling with increasing worker count. The initial targets are 10,000+ jobs/hour, 5-10 workers, zero lost accepted jobs, and recovery under 30 seconds. Report workload, hardware, and lease/detection configuration alongside measured results.
 
-There are no runnable project checks yet. As tooling is introduced, document the actual setup, build, test, migration, and local-run commands in the README. Run checks appropriate to each implemented change.
+Available checks: `make fmt`, `make build`, `make vet`, `make test`, `make race`, and `TEST_DATABASE_URL=... make integration`. Integration tests use isolated PostgreSQL schemas and require schema-creation permission; they do not truncate existing tables. `make generate` regenerates sqlc code. See the README for startup and migration commands. Run checks appropriate to each implemented change. Reliability tests for leases/crashes, frontend checks, load tests, and CI remain pending.
 
 ## Scope boundaries
 

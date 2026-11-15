@@ -2,11 +2,82 @@
 
 A fault-tolerant, horizontally scalable distributed job execution platform built in Go. JobFlow will let developers submit, schedule, execute, retry, and monitor asynchronous background tasks across multiple workers through a REST API and lightweight Python SDK.
 
-**Status: specification stage.** This repository currently contains planning documentation. The capabilities, endpoints, layout, and performance targets below describe the intended MVP; they are not implemented or measured yet. Setup and run instructions will be added as the application is built.
+**Status: Milestone 1 implemented.** The API, PostgreSQL schema, and one single-slot worker support durable submission, execution, and result retrieval. Distributed concurrency and recovery remain future milestones. The complete MVP capabilities and performance targets below remain a roadmap, not achieved results.
+
+## Run Milestone 1 locally
+
+Requirements: Docker with Compose. Go 1.24 or newer is needed for local Go commands. The container build pins Go 1.24.9. No host PostgreSQL client or migration tool is required.
+
+```sh
+cp .env.example .env
+docker compose up --build -d
+```
+
+Compose waits for PostgreSQL, runs the versioned migrations as a separate one-shot service, then starts the API and one worker. PostgreSQL data lives in a persistent named volume. Edit `.env` before startup to change `POSTGRES_PORT` or `API_PORT` if their defaults (5432 and 8080) are in use. Credentials are for local development; use URL-safe credentials with this Compose configuration.
+
+```sh
+curl -sS http://localhost:8080/health
+curl -sS -X POST http://localhost:8080/api/v1/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"add_numbers","payload":{"a":20,"b":22}}'
+# Copy job_id from the response:
+curl -sS http://localhost:8080/api/v1/jobs/JOB_ID
+```
+
+Submission returns `202 Accepted` with `job_id` and `status: QUEUED` after persistence. Retrieval returns `id`, `type`, `payload`, `status`, timestamps, and the result or `last_error`. The example reaches `COMPLETED` with `result: {"sum":42}`. `add_numbers` accepts exactly two signed 64-bit integers, `a` and `b`. Addition overflow is an execution failure and produces a persisted `FAILED` job.
+
+The implemented lifecycle is `QUEUED -> RUNNING -> COMPLETED` or `FAILED`. Invalid JSON, unknown tasks/fields, case aliases, duplicate keys, invalid payloads, and unsupported options return `400`; bodies over 64 KiB return `413`; unknown job IDs return `404`; database errors return `503`. `/health` checks database connectivity and returns `503` when unavailable. `Idempotency-Key` is explicitly rejected until deduplication exists.
+
+```sh
+docker compose logs -f api worker
+docker compose stop worker            # New submissions remain queued
+docker compose restart api           # Persisted jobs survive
+docker compose start worker          # Drain queued jobs
+docker compose down                  # Keeps the database volume
+```
+
+**Current limitation:** a hard worker crash after claiming, an exceeded shutdown window, or a failed outcome write can leave a job `RUNNING`. There is no lease-based reclamation or automatic retry yet. The worker exits on outcome-persistence failure rather than repeating possible external side effects. Graceful shutdown stops claiming and allows in-flight work up to `WORKER_SHUTDOWN_TIMEOUT` (10 seconds by default). Keep Compose's `stop_grace_period` longer than that setting. Milestone 1 does not yet deliver the full MVP's at-least-once recovery guarantees.
+
+### Development and checks
+
+```sh
+make fmt
+make build
+make vet
+make test
+make race
+# Uses a real PostgreSQL instance; every test creates and drops its own random schema:
+TEST_DATABASE_URL='postgres://jobflow:jobflow@localhost:5432/jobflow?sslmode=disable' make integration
+```
+
+The integration database role needs schema-creation permission. Tests never truncate existing tables; cleanup drops only their own generated schemas. Run `docker compose up -d postgres` to provide the development database. Ordinary unit tests do not require PostgreSQL; integration tests are build-tagged and fail with instructions if `TEST_DATABASE_URL` is absent.
+
+SQL queries live in `queries/jobs.sql`; generated pgx code is checked into `internal/store/db/`. After changing schema or queries, run `make generate` (pinned sqlc v1.30.0; first use downloads the tool). Run migrations explicitly with `docker compose run --rm migrate`. Startup does not silently migrate from application processes.
+
+For host processes, set `DATABASE_URL` and optionally `API_ADDR`, `WORKER_POLL_INTERVAL`, and `WORKER_SHUTDOWN_TIMEOUT`, then use `go run ./cmd/api` and `go run ./cmd/worker` in separate terminals. The `.env` file is consumed by Compose, not automatically loaded by Go.
+
+Real-PostgreSQL tests cover durable submission across API recreation, successful and failed execution, atomic claims, terminal state protection, rejection without insertion, claim-lock release during execution, and graceful shutdown. Multiple-worker scaling, crash recovery, retries, fencing, scheduling, cancellation, the SDK, dashboard, metrics, and CI remain pending.
+
+
+### Milestone 1 verification record
+
+Initial verification on November 14, 2026; review-fix regression checks on November 15, 2026:
+
+- Go formatting, `go build ./...`, `go vet ./...`, `go test ./...`, and `go test -race ./...` passed.
+- All four real-PostgreSQL integration tests passed against PostgreSQL 17.6, using isolated schemas.
+- The Go 1.24.9 container build, migration service, API, and worker ran successfully through Docker Compose in a dedicated verification project.
+- A job submitted while the worker was stopped remained queued across API restart, then completed with sum 42 after worker startup.
+- Overflow produced a persisted failure; completed and failed outcomes survived API/worker restart.
+- Invalid requests, unsupported retry options and idempotency keys, and missing IDs returned the documented errors. Case aliases and duplicate keys are rejected before persistence; PostgreSQL JSONB normalization cannot change accepted task inputs.
+- Shutdown regression tests confirm that a blocked outcome write does not make pool cleanup exceed the configured grace deadline; normal graceful completion still closes the pool.
+- A process-level check blocked a real PostgreSQL outcome write, sent `SIGTERM`, and observed worker exit in 1.00 seconds with a one-second shutdown window.
+- Stopping PostgreSQL caused health and submission to return `503`; restoring it allowed reconnection with stored outcomes intact.
+
+These are correctness checks for Milestone 1, not throughput benchmarks or proof of automatic crash recovery.
 
 The primary objective is to keep accepted jobs durable, execute them reliably, and recover automatically from worker crashes, transient failures, and service restarts. Distributed coordination will be implemented directly using PostgreSQL transactions.
 
-## MVP capabilities
+## Planned full MVP capabilities
 
 - Durable job submission and storage in PostgreSQL.
 - Distributed execution across independent workers with configurable local concurrency.
@@ -21,7 +92,7 @@ The primary objective is to keep accepted jobs durable, execute them reliably, a
 
 ### Execution guarantees
 
-JobFlow provides **at-least-once execution**. A task may run more than once after a crash or lost lease. Fencing protects JobFlow's stored state; task handlers must separately make external side effects safe to repeat.
+The full MVP will provide **at-least-once execution**. A task may run more than once after a crash or lost lease. Fencing protects JobFlow's stored state; task handlers must separately make external side effects safe to repeat.
 
 Submission idempotency deduplicates repeated requests with the same key and equivalent payload. It does not by itself prevent duplicate external side effects during execution.
 
@@ -59,7 +130,7 @@ The codebase will be modular, with separate API, worker, and scheduler entry poi
 | GET | `/metrics` | Export Prometheus metrics |
 | GET | `/health` | Check API health |
 
-Example submission contract:
+Future MVP submission contract (retry and timeout options are not supported in Milestone 1):
 
 ```http
 POST /api/v1/jobs
@@ -132,11 +203,12 @@ docs/
 docker-compose.yml
 README.md
 CLAUDE.md
+AGENTS.md
 ```
 
 ## Development roadmap
 
-1. **Basic execution engine:** Initialize Go, PostgreSQL schema, job submission, and one worker with registered handlers. Deliver submission, execution, and result retrieval.
+1. **Basic execution engine (implemented):** Go project, PostgreSQL schema, submission/retrieval API, and one worker with registered handlers.
 2. **Distributed concurrency:** Add transactional claiming, multiple worker processes, bounded goroutine concurrency, and attempt tracking. Demonstrate that workers cannot simultaneously claim the same available job.
 3. **Reliability and recovery:** Add leases, heartbeats, fencing, retries, backoff, timeouts, idempotency, and dead-letter handling. Recover a killed worker's job without corrupting execution state.
 4. **Developer experience:** Add scheduling, cancellation, the remaining REST endpoints, Python SDK, and basic React dashboard. Manage jobs without direct database access.
