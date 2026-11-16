@@ -6,7 +6,7 @@ JobFlow is a Go distributed job execution platform. Its core objective is durabl
 
 Read [README.md](README.md) for the MVP scope, planned API, data model, directory layout, roadmap, and definition of done. These documents summarize the supplied *JobFlow - Complete MVP Specification*.
 
-Milestones 1 and 2 are implemented: `cmd/api`, `cmd/worker`, PostgreSQL migrations, sqlc queries, Docker Compose, and unit/integration tests exist. `add_numbers`, submit/get/health, multiple independent workers with bounded local concurrency, and transactional `job_attempts` histories are implemented. Compose defaults to three workers with four slots each. Attempt-history API endpoints and worker registration/health remain planned. Lease recovery, fencing, retries, and the rest of the MVP remain planned. A hard crash or failed outcome write may strand `RUNNING` jobs. Do not claim benchmark targets as measured performance. Follow [AGENTS.md](AGENTS.md) for bounded implementation and review.
+Milestones 1–3 are implemented: API/worker executables, PostgreSQL migrations/sqlc, distributed bounded concurrency, atomic attempt histories, renewable fenced leases, worker heartbeats, automatic recovery, bounded jittered retries, cooperative execution timeouts, idempotent submission, dead letters, and manual retry. Compose defaults to three workers with four slots each. Attempt-history/worker-health API endpoints remain deferred; SQL inspection and process/Compose reliability tests exist. See the README reliability contracts for defaults, transitions, idempotency retention/conflicts, timeout limitations, and upgrade requirements. Do not claim benchmark targets as measured performance. Follow [AGENTS.md](AGENTS.md) for bounded implementation and review.
 
 ## Architecture and stack
 
@@ -90,7 +90,7 @@ Validate the complete Docker Compose scenario with five workers, terminate two d
 
 Measure queue latency, throughput, retry rates, recovery time, and scaling with increasing worker count. The initial targets are 10,000+ jobs/hour, 5-10 workers, zero lost accepted jobs, and recovery under 30 seconds. Report workload, hardware, and lease/detection configuration alongside measured results.
 
-Available checks: `make fmt`, `make build`, `make vet`, `make test`, `make race`, and `TEST_DATABASE_URL=... make integration`. Integration tests use isolated PostgreSQL schemas and require schema-creation permission; they do not truncate existing tables. `make generate` regenerates sqlc code. See the README for startup and migration commands. Run checks appropriate to each implemented change. Reliability tests for leases/crashes, frontend checks, load tests, and CI remain pending.
+Available checks: `make fmt`, `make build`, `make vet`, `make test`, `make race`, and `TEST_DATABASE_URL=... make integration`. Integration tests use isolated PostgreSQL schemas and require schema-creation permission; they do not truncate existing tables. `make generate` regenerates sqlc code. See the README for startup and migration commands. Run checks appropriate to each implemented change. Lease/crash reliability checks exist in the PostgreSQL integration suite and `tests/reliability/compose_recovery.py`; frontend checks, load tests, and CI remain pending.
 
 ## Scope boundaries
 

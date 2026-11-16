@@ -6,7 +6,7 @@ JobFlow is a distributed job execution engine planned in Go and PostgreSQL. Corr
 
 Read [README.md](README.md) for scope, architecture, roadmap, and MVP acceptance criteria, and [CLAUDE.md](CLAUDE.md) for detailed implementation guidance. This file defines the development and review workflow.
 
-Milestones 1 and 2 have Go entry points under `cmd/api` and `cmd/worker`, backend packages under `internal/`, schema changes under `migrations/`, sqlc source queries under `queries/`, and real PostgreSQL tests under `tests/integration/`. Docker Compose provides local PostgreSQL, explicit migrations, API, and three independent workers with configurable local concurrency. Attempt histories are committed atomically with claims and outcomes. The Python client, dashboard, recovery/reliability harness, load tests, and CI remain planned.
+Milestones 1–3 have Go entry points under `cmd/api` and `cmd/worker`, backend packages under `internal/`, schema changes under `migrations/`, sqlc source queries under `queries/`, and real PostgreSQL tests under `tests/integration/`. Docker Compose provides local PostgreSQL, explicit migrations, API, and three independent workers with configurable local concurrency. Attempt histories are committed atomically with claims and outcomes. Renewable fenced leases, recovery, retries, timeouts, idempotency, dead letters, and manual retry are implemented. Process crash tests and an isolated multi-worker Compose reliability scenario exist. The Python client, dashboard, load tests, and CI remain planned.
 
 ## Agent roles
 
@@ -86,7 +86,7 @@ Prefer integration tests using real PostgreSQL transactions for distributed coor
 
 ## Testing and available commands
 
-The Go module, Makefile, Docker Compose, migrations, and integration harness are established. See the README for setup. `make generate` regenerates checked-in sqlc code. Do not present pending frontend, recovery, load, or CI commands as working checks.
+The Go module, Makefile, Docker Compose, migrations, and integration harness are established. See the README for setup. `make generate` regenerates checked-in sqlc code. Do not present pending frontend, load, or CI commands as working checks.
 
 Use the checks relevant to changed code once the corresponding infrastructure exists:
 
@@ -96,7 +96,7 @@ Use the checks relevant to changed code once the corresponding infrastructure ex
 | Go unit tests | `make test` |
 | Go race detector for concurrency-sensitive changes | `make race` |
 | PostgreSQL integration tests | `TEST_DATABASE_URL=... make integration`; isolated schemas, schema-creation permission required |
-| Targeted worker crash and lease-expiration tests | Pending worker/recovery implementation and fault-injection harness |
+| Targeted worker crash and lease-expiration tests | PostgreSQL integration suite (including killed subprocess); `python3 tests/reliability/compose_recovery.py` for an isolated five-worker scenario |
 | Frontend lint, type checking, and tests | Pending `web/` and configured package scripts |
 | Load tests and benchmarks | Pending application and k6 harness setup |
 | Broader automated regression checks | Run unit/race and PostgreSQL integration suites; CI pending |
