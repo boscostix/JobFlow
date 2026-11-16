@@ -6,7 +6,7 @@ JobFlow is a Go distributed job execution platform. Its core objective is durabl
 
 Read [README.md](README.md) for the MVP scope, planned API, data model, directory layout, roadmap, and definition of done. These documents summarize the supplied *JobFlow - Complete MVP Specification*.
 
-Milestone 1 is implemented: `cmd/api`, `cmd/worker`, PostgreSQL migrations, sqlc queries, Docker Compose, and unit/integration tests exist. Only `add_numbers`, submit/get/health, and the single-slot lifecycle are implemented. Lease recovery, fencing, retries, and the rest of the MVP remain planned. A hard crash or failed outcome write may strand `RUNNING` jobs. Do not claim benchmark targets as measured performance. Follow [AGENTS.md](AGENTS.md) for bounded implementation and review.
+Milestones 1 and 2 are implemented: `cmd/api`, `cmd/worker`, PostgreSQL migrations, sqlc queries, Docker Compose, and unit/integration tests exist. `add_numbers`, submit/get/health, multiple independent workers with bounded local concurrency, and transactional `job_attempts` histories are implemented. Compose defaults to three workers with four slots each. Attempt-history API endpoints and worker registration/health remain planned. Lease recovery, fencing, retries, and the rest of the MVP remain planned. A hard crash or failed outcome write may strand `RUNNING` jobs. Do not claim benchmark targets as measured performance. Follow [AGENTS.md](AGENTS.md) for bounded implementation and review.
 
 ## Architecture and stack
 

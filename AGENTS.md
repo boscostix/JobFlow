@@ -6,7 +6,7 @@ JobFlow is a distributed job execution engine planned in Go and PostgreSQL. Corr
 
 Read [README.md](README.md) for scope, architecture, roadmap, and MVP acceptance criteria, and [CLAUDE.md](CLAUDE.md) for detailed implementation guidance. This file defines the development and review workflow.
 
-Milestone 1 now has Go entry points under `cmd/api` and `cmd/worker`, backend packages under `internal/`, schema changes under `migrations/`, sqlc source queries under `queries/`, and real PostgreSQL tests under `tests/integration/`. Docker Compose provides local PostgreSQL, explicit migrations, API, and one worker. The Python client, dashboard, recovery/reliability harness, load tests, and CI remain planned.
+Milestones 1 and 2 have Go entry points under `cmd/api` and `cmd/worker`, backend packages under `internal/`, schema changes under `migrations/`, sqlc source queries under `queries/`, and real PostgreSQL tests under `tests/integration/`. Docker Compose provides local PostgreSQL, explicit migrations, API, and three independent workers with configurable local concurrency. Attempt histories are committed atomically with claims and outcomes. The Python client, dashboard, recovery/reliability harness, load tests, and CI remain planned.
 
 ## Agent roles
 
