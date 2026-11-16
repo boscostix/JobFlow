@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
@@ -36,13 +38,23 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	concurrency, err := config.Concurrency()
+	if err != nil {
+		return err
+	}
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return err
+	}
+	workerID := "worker_" + hex.EncodeToString(token[:])
+	logger.Info("worker starting", "worker_id", workerID, "concurrency", concurrency)
 	pool, err := pgxpool.New(context.Background(), url)
 	if err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	w := worker.Worker{Store: store.New(pool), Registry: tasks.DefaultRegistry(), Log: logger, PollInterval: poll}
+	w := worker.Worker{ID: workerID, Concurrency: concurrency, Store: store.New(pool), Registry: tasks.DefaultRegistry(), Log: logger, PollInterval: poll}
 	return runWorker(ctx, grace, w.Run, pool.Close)
 }
 
@@ -63,7 +75,7 @@ func runWorker(ctx context.Context, grace time.Duration, run func(context.Contex
 			closePool()
 			return err
 		case <-timer.C:
-			return fmt.Errorf("shutdown exceeded %s; in-flight job may remain RUNNING", grace)
+			return fmt.Errorf("shutdown exceeded %s; in-flight jobs may remain RUNNING", grace)
 		}
 	}
 }

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -29,4 +30,13 @@ func Duration(key string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("%s must be a positive duration", key)
 	}
 	return d, nil
+}
+
+// Concurrency bounds the number of execution slots allocated by each process.
+func Concurrency() (int, error) {
+	n, err := strconv.Atoi(Env("WORKER_CONCURRENCY", "4"))
+	if err != nil || n < 1 || n > 256 {
+		return 0, fmt.Errorf("WORKER_CONCURRENCY must be between 1 and 256")
+	}
+	return n, nil
 }

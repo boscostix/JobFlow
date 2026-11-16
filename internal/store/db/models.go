@@ -19,3 +19,14 @@ type Job struct {
 	Result      []byte             `json:"result"`
 	LastError   pgtype.Text        `json:"last_error"`
 }
+
+type JobAttempt struct {
+	JobID         string             `json:"job_id"`
+	AttemptNumber int32              `json:"attempt_number"`
+	WorkerID      string             `json:"worker_id"`
+	Status        string             `json:"status"`
+	StartedAt     pgtype.Timestamptz `json:"started_at"`
+	CompletedAt   pgtype.Timestamptz `json:"completed_at"`
+	Result        []byte             `json:"result"`
+	LastError     pgtype.Text        `json:"last_error"`
+}

@@ -24,7 +24,7 @@ type fakeStore struct {
 	saved      chan struct{}
 }
 
-func (s *fakeStore) Claim(context.Context) (jobs.Job, error) {
+func (s *fakeStore) Claim(context.Context, string) (jobs.Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.claimed {
@@ -69,7 +69,7 @@ func TestOutcomes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &fakeStore{}
-			w := Worker{Store: s, Registry: tasks.Registry{"test": tc.h}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			w := Worker{ID: "test-worker", Concurrency: 1, Store: s, Registry: tasks.Registry{"test": tc.h}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 			err := w.execute(context.Background(), jobs.Job{ID: "j", TaskType: "test"})
 			if err != nil {
 				t.Fatal(err)
@@ -86,7 +86,7 @@ func TestOutcomes(t *testing.T) {
 func TestPersistenceFailureStopsWorker(t *testing.T) {
 	s := &fakeStore{persistErr: errors.New("offline")}
 	calls := 0
-	w := Worker{Store: s, Registry: tasks.Registry{"test": handler{func(context.Context) (json.RawMessage, error) { calls++; return json.RawMessage(`{}`), nil }}}, Log: slog.New(slog.NewTextHandler(io.Discard, nil)), PollInterval: time.Millisecond}
+	w := Worker{ID: "test-worker", Concurrency: 1, Store: s, Registry: tasks.Registry{"test": handler{func(context.Context) (json.RawMessage, error) { calls++; return json.RawMessage(`{}`), nil }}}, Log: slog.New(slog.NewTextHandler(io.Discard, nil)), PollInterval: time.Millisecond}
 	if err := w.Run(context.Background()); err == nil {
 		t.Fatal("persistence failure ignored")
 	}
@@ -98,7 +98,7 @@ func TestShutdownFinishesInFlight(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	s := &fakeStore{saved: make(chan struct{})}
-	w := Worker{Store: s, Registry: tasks.Registry{"test": handler{func(ctx context.Context) (json.RawMessage, error) {
+	w := Worker{ID: "test-worker", Concurrency: 1, Store: s, Registry: tasks.Registry{"test": handler{func(ctx context.Context) (json.RawMessage, error) {
 		close(started)
 		<-release
 		return json.RawMessage(`{}`), ctx.Err()

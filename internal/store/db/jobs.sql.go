@@ -55,6 +55,24 @@ func (q *Queries) CompleteJob(ctx context.Context, arg CompleteJobParams) (int64
 	return result.RowsAffected(), nil
 }
 
+const createAttempt = `-- name: CreateAttempt :execrows
+INSERT INTO job_attempts (job_id, attempt_number, worker_id, status, started_at)
+SELECT id, 1, $2, 'RUNNING', started_at FROM jobs WHERE id = $1 AND status = 'RUNNING'
+`
+
+type CreateAttemptParams struct {
+	ID       string `json:"id"`
+	WorkerID string `json:"worker_id"`
+}
+
+func (q *Queries) CreateAttempt(ctx context.Context, arg CreateAttemptParams) (int64, error) {
+	result, err := q.db.Exec(ctx, createAttempt, arg.ID, arg.WorkerID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const createJob = `-- name: CreateJob :one
 INSERT INTO jobs (id, task_type, payload) VALUES ($1, $2, $3) RETURNING id, task_type, payload, status, created_at, started_at, completed_at, result, last_error
 `
@@ -94,6 +112,22 @@ type FailJobParams struct {
 
 func (q *Queries) FailJob(ctx context.Context, arg FailJobParams) (int64, error) {
 	result, err := q.db.Exec(ctx, failJob, arg.ID, arg.LastError)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const finishAttempt = `-- name: FinishAttempt :execrows
+UPDATE job_attempts SET status = jobs.status, completed_at = jobs.completed_at,
+    result = jobs.result, last_error = jobs.last_error
+FROM jobs WHERE job_attempts.job_id = jobs.id AND jobs.id = $1
+    AND job_attempts.attempt_number = 1 AND job_attempts.status = 'RUNNING'
+    AND jobs.status IN ('COMPLETED', 'FAILED')
+`
+
+func (q *Queries) FinishAttempt(ctx context.Context, id string) (int64, error) {
+	result, err := q.db.Exec(ctx, finishAttempt, id)
 	if err != nil {
 		return 0, err
 	}

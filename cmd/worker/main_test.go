@@ -16,7 +16,7 @@ import (
 
 type blockedPersistence struct{ entered, release chan struct{} }
 
-func (s blockedPersistence) Claim(context.Context) (jobs.Job, error) {
+func (s blockedPersistence) Claim(context.Context, string) (jobs.Job, error) {
 	return jobs.Job{ID: "test", TaskType: "add_numbers", Payload: json.RawMessage(`{"a":1,"b":2}`)}, nil
 }
 func (s blockedPersistence) Complete(context.Context, string, json.RawMessage) error {
@@ -30,7 +30,7 @@ func (s blockedPersistence) Fail(context.Context, string, string) error {
 
 func TestShutdownDeadlineDoesNotWaitForBlockedPersistenceCleanup(t *testing.T) {
 	s := blockedPersistence{make(chan struct{}), make(chan struct{})}
-	w := worker.Worker{Store: s, Registry: tasks.DefaultRegistry(), Log: slog.New(slog.NewTextHandler(io.Discard, nil)), PollInterval: time.Millisecond}
+	w := worker.Worker{ID: "test-worker", Concurrency: 1, Store: s, Registry: tasks.DefaultRegistry(), Log: slog.New(slog.NewTextHandler(io.Discard, nil)), PollInterval: time.Millisecond}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	finished := make(chan struct{})
