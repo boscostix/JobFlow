@@ -33,14 +33,14 @@ func (s *fakeStore) Claim(context.Context, string) (jobs.Job, error) {
 	s.claimed = true
 	return jobs.Job{ID: "j", TaskType: "test", Payload: json.RawMessage(`{}`)}, nil
 }
-func (s *fakeStore) Complete(context.Context, string, json.RawMessage) error {
+func (s *fakeStore) Complete(context.Context, jobs.Job, json.RawMessage) error {
 	s.complete = true
 	if s.saved != nil {
 		close(s.saved)
 	}
 	return s.persistErr
 }
-func (s *fakeStore) Fail(_ context.Context, _ string, message string) error {
+func (s *fakeStore) Fail(_ context.Context, _ jobs.Job, message string) error {
 	s.failure = message
 	if s.saved != nil {
 		close(s.saved)
@@ -135,3 +135,7 @@ func TestShutdownFinishesInFlight(t *testing.T) {
 		t.Fatal("claimed during shutdown")
 	}
 }
+
+func (s *fakeStore) Renew(context.Context, jobs.Job) error   { return nil }
+func (s *fakeStore) Recover(context.Context) error           { return nil }
+func (s *fakeStore) Heartbeat(context.Context, string) error { return nil }

@@ -13,15 +13,22 @@ import (
 
 const claimJob = `-- name: ClaimJob :one
 WITH candidate AS (
-    SELECT id FROM jobs WHERE status = 'QUEUED'
-    ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT 1
+ SELECT id FROM jobs WHERE status='QUEUED' AND next_run_at <= clock_timestamp()
+ ORDER BY next_run_at,created_at,id FOR UPDATE SKIP LOCKED LIMIT 1
 )
-UPDATE jobs SET status = 'RUNNING', started_at = now()
-FROM candidate WHERE jobs.id = candidate.id RETURNING jobs.id, jobs.task_type, jobs.payload, jobs.status, jobs.created_at, jobs.started_at, jobs.completed_at, jobs.result, jobs.last_error
+UPDATE jobs SET status='RUNNING',started_at=clock_timestamp(),last_error=NULL,
+ attempt_count=attempt_count+1,fencing_token=fencing_token+1,lease_owner=$1,
+ lease_expires_at=clock_timestamp()+$2::bigint * interval '1 millisecond'
+FROM candidate WHERE jobs.id=candidate.id RETURNING jobs.id, jobs.task_type, jobs.payload, jobs.status, jobs.created_at, jobs.started_at, jobs.completed_at, jobs.result, jobs.last_error, jobs.attempt_count, jobs.retry_start, jobs.max_retries, jobs.timeout_seconds, jobs.next_run_at, jobs.lease_owner, jobs.lease_expires_at, jobs.fencing_token
 `
 
-func (q *Queries) ClaimJob(ctx context.Context) (Job, error) {
-	row := q.db.QueryRow(ctx, claimJob)
+type ClaimJobParams struct {
+	LeaseOwner pgtype.Text `json:"lease_owner"`
+	LeaseMs    int64       `json:"lease_ms"`
+}
+
+func (q *Queries) ClaimJob(ctx context.Context, arg ClaimJobParams) (Job, error) {
+	row := q.db.QueryRow(ctx, claimJob, arg.LeaseOwner, arg.LeaseMs)
 	var i Job
 	err := row.Scan(
 		&i.ID,
@@ -33,40 +40,25 @@ func (q *Queries) ClaimJob(ctx context.Context) (Job, error) {
 		&i.CompletedAt,
 		&i.Result,
 		&i.LastError,
+		&i.AttemptCount,
+		&i.RetryStart,
+		&i.MaxRetries,
+		&i.TimeoutSeconds,
+		&i.NextRunAt,
+		&i.LeaseOwner,
+		&i.LeaseExpiresAt,
+		&i.FencingToken,
 	)
 	return i, err
 }
 
-const completeJob = `-- name: CompleteJob :execrows
-UPDATE jobs SET status = 'COMPLETED', completed_at = now(), result = $2
-WHERE id = $1 AND status = 'RUNNING'
-`
-
-type CompleteJobParams struct {
-	ID     string `json:"id"`
-	Result []byte `json:"result"`
-}
-
-func (q *Queries) CompleteJob(ctx context.Context, arg CompleteJobParams) (int64, error) {
-	result, err := q.db.Exec(ctx, completeJob, arg.ID, arg.Result)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const createAttempt = `-- name: CreateAttempt :execrows
-INSERT INTO job_attempts (job_id, attempt_number, worker_id, status, started_at)
-SELECT id, 1, $2, 'RUNNING', started_at FROM jobs WHERE id = $1 AND status = 'RUNNING'
+INSERT INTO job_attempts(job_id,attempt_number,worker_id,status,started_at,fencing_token)
+SELECT id,attempt_count,lease_owner,'RUNNING',started_at,fencing_token FROM jobs WHERE id=$1 AND status='RUNNING'
 `
 
-type CreateAttemptParams struct {
-	ID       string `json:"id"`
-	WorkerID string `json:"worker_id"`
-}
-
-func (q *Queries) CreateAttempt(ctx context.Context, arg CreateAttemptParams) (int64, error) {
-	result, err := q.db.Exec(ctx, createAttempt, arg.ID, arg.WorkerID)
+func (q *Queries) CreateAttempt(ctx context.Context, id string) (int64, error) {
+	result, err := q.db.Exec(ctx, createAttempt, id)
 	if err != nil {
 		return 0, err
 	}
@@ -74,17 +66,25 @@ func (q *Queries) CreateAttempt(ctx context.Context, arg CreateAttemptParams) (i
 }
 
 const createJob = `-- name: CreateJob :one
-INSERT INTO jobs (id, task_type, payload) VALUES ($1, $2, $3) RETURNING id, task_type, payload, status, created_at, started_at, completed_at, result, last_error
+INSERT INTO jobs (id, task_type, payload, max_retries, timeout_seconds) VALUES ($1,$2,$3,$4,$5) RETURNING id, task_type, payload, status, created_at, started_at, completed_at, result, last_error, attempt_count, retry_start, max_retries, timeout_seconds, next_run_at, lease_owner, lease_expires_at, fencing_token
 `
 
 type CreateJobParams struct {
-	ID       string `json:"id"`
-	TaskType string `json:"task_type"`
-	Payload  []byte `json:"payload"`
+	ID             string `json:"id"`
+	TaskType       string `json:"task_type"`
+	Payload        []byte `json:"payload"`
+	MaxRetries     int32  `json:"max_retries"`
+	TimeoutSeconds int32  `json:"timeout_seconds"`
 }
 
 func (q *Queries) CreateJob(ctx context.Context, arg CreateJobParams) (Job, error) {
-	row := q.db.QueryRow(ctx, createJob, arg.ID, arg.TaskType, arg.Payload)
+	row := q.db.QueryRow(ctx, createJob,
+		arg.ID,
+		arg.TaskType,
+		arg.Payload,
+		arg.MaxRetries,
+		arg.TimeoutSeconds,
+	)
 	var i Job
 	err := row.Scan(
 		&i.ID,
@@ -96,46 +96,139 @@ func (q *Queries) CreateJob(ctx context.Context, arg CreateJobParams) (Job, erro
 		&i.CompletedAt,
 		&i.Result,
 		&i.LastError,
+		&i.AttemptCount,
+		&i.RetryStart,
+		&i.MaxRetries,
+		&i.TimeoutSeconds,
+		&i.NextRunAt,
+		&i.LeaseOwner,
+		&i.LeaseExpiresAt,
+		&i.FencingToken,
 	)
 	return i, err
 }
 
-const failJob = `-- name: FailJob :execrows
-UPDATE jobs SET status = 'FAILED', completed_at = now(), last_error = $2
-WHERE id = $1 AND status = 'RUNNING'
+const equivalentSubmission = `-- name: EquivalentSubmission :one
+SELECT task_type=$2 AND payload=$3::jsonb AND max_retries=$4 AND timeout_seconds=$5 AS equivalent FROM jobs WHERE id=$1
 `
 
-type FailJobParams struct {
-	ID        string      `json:"id"`
-	LastError pgtype.Text `json:"last_error"`
+type EquivalentSubmissionParams struct {
+	ID             string `json:"id"`
+	TaskType       string `json:"task_type"`
+	Column3        []byte `json:"column_3"`
+	MaxRetries     int32  `json:"max_retries"`
+	TimeoutSeconds int32  `json:"timeout_seconds"`
 }
 
-func (q *Queries) FailJob(ctx context.Context, arg FailJobParams) (int64, error) {
-	result, err := q.db.Exec(ctx, failJob, arg.ID, arg.LastError)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+func (q *Queries) EquivalentSubmission(ctx context.Context, arg EquivalentSubmissionParams) (pgtype.Bool, error) {
+	row := q.db.QueryRow(ctx, equivalentSubmission,
+		arg.ID,
+		arg.TaskType,
+		arg.Column3,
+		arg.MaxRetries,
+		arg.TimeoutSeconds,
+	)
+	var equivalent pgtype.Bool
+	err := row.Scan(&equivalent)
+	return equivalent, err
 }
 
 const finishAttempt = `-- name: FinishAttempt :execrows
-UPDATE job_attempts SET status = jobs.status, completed_at = jobs.completed_at,
-    result = jobs.result, last_error = jobs.last_error
-FROM jobs WHERE job_attempts.job_id = jobs.id AND jobs.id = $1
-    AND job_attempts.attempt_number = 1 AND job_attempts.status = 'RUNNING'
-    AND jobs.status IN ('COMPLETED', 'FAILED')
+UPDATE job_attempts SET status=$3,completed_at=now(),result=$4,last_error=$5
+WHERE job_id=$1 AND fencing_token=$2 AND status='RUNNING'
 `
 
-func (q *Queries) FinishAttempt(ctx context.Context, id string) (int64, error) {
-	result, err := q.db.Exec(ctx, finishAttempt, id)
+type FinishAttemptParams struct {
+	JobID        string      `json:"job_id"`
+	FencingToken int64       `json:"fencing_token"`
+	Status       string      `json:"status"`
+	Result       []byte      `json:"result"`
+	LastError    pgtype.Text `json:"last_error"`
+}
+
+func (q *Queries) FinishAttempt(ctx context.Context, arg FinishAttemptParams) (int64, error) {
+	result, err := q.db.Exec(ctx, finishAttempt,
+		arg.JobID,
+		arg.FencingToken,
+		arg.Status,
+		arg.Result,
+		arg.LastError,
+	)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected(), nil
 }
 
+const finishJob = `-- name: FinishJob :execrows
+UPDATE jobs SET status=$1,completed_at=CASE WHEN $1::text='QUEUED' THEN NULL ELSE now() END,
+ started_at=CASE WHEN $1::text='QUEUED' THEN NULL ELSE started_at END,
+ result=$2,last_error=$3,lease_owner=NULL,lease_expires_at=NULL,
+ next_run_at=clock_timestamp()+$4::bigint * interval '1 millisecond'
+WHERE id=$5 AND status='RUNNING' AND lease_owner=$6 AND fencing_token=$7
+ AND (($8::boolean AND lease_expires_at<=clock_timestamp()) OR
+ (NOT $8::boolean AND lease_expires_at>clock_timestamp()))
+`
+
+type FinishJobParams struct {
+	NewStatus string      `json:"new_status"`
+	Result    []byte      `json:"result"`
+	LastError pgtype.Text `json:"last_error"`
+	DelayMs   int64       `json:"delay_ms"`
+	ID        string      `json:"id"`
+	Owner     pgtype.Text `json:"owner"`
+	Token     int64       `json:"token"`
+	Expired   bool        `json:"expired"`
+}
+
+func (q *Queries) FinishJob(ctx context.Context, arg FinishJobParams) (int64, error) {
+	result, err := q.db.Exec(ctx, finishJob,
+		arg.NewStatus,
+		arg.Result,
+		arg.LastError,
+		arg.DelayMs,
+		arg.ID,
+		arg.Owner,
+		arg.Token,
+		arg.Expired,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const getIdempotentJob = `-- name: GetIdempotentJob :one
+SELECT jobs.id, jobs.task_type, jobs.payload, jobs.status, jobs.created_at, jobs.started_at, jobs.completed_at, jobs.result, jobs.last_error, jobs.attempt_count, jobs.retry_start, jobs.max_retries, jobs.timeout_seconds, jobs.next_run_at, jobs.lease_owner, jobs.lease_expires_at, jobs.fencing_token FROM jobs JOIN idempotency_keys ON jobs.id=idempotency_keys.job_id WHERE key=$1
+`
+
+func (q *Queries) GetIdempotentJob(ctx context.Context, key string) (Job, error) {
+	row := q.db.QueryRow(ctx, getIdempotentJob, key)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.TaskType,
+		&i.Payload,
+		&i.Status,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.LastError,
+		&i.AttemptCount,
+		&i.RetryStart,
+		&i.MaxRetries,
+		&i.TimeoutSeconds,
+		&i.NextRunAt,
+		&i.LeaseOwner,
+		&i.LeaseExpiresAt,
+		&i.FencingToken,
+	)
+	return i, err
+}
+
 const getJob = `-- name: GetJob :one
-SELECT id, task_type, payload, status, created_at, started_at, completed_at, result, last_error FROM jobs WHERE id = $1
+SELECT id, task_type, payload, status, created_at, started_at, completed_at, result, last_error, attempt_count, retry_start, max_retries, timeout_seconds, next_run_at, lease_owner, lease_expires_at, fencing_token FROM jobs WHERE id=$1
 `
 
 func (q *Queries) GetJob(ctx context.Context, id string) (Job, error) {
@@ -151,6 +244,154 @@ func (q *Queries) GetJob(ctx context.Context, id string) (Job, error) {
 		&i.CompletedAt,
 		&i.Result,
 		&i.LastError,
+		&i.AttemptCount,
+		&i.RetryStart,
+		&i.MaxRetries,
+		&i.TimeoutSeconds,
+		&i.NextRunAt,
+		&i.LeaseOwner,
+		&i.LeaseExpiresAt,
+		&i.FencingToken,
 	)
 	return i, err
+}
+
+const heartbeat = `-- name: Heartbeat :exec
+INSERT INTO workers(id) VALUES($1) ON CONFLICT(id) DO UPDATE SET heartbeat_at=clock_timestamp()
+`
+
+func (q *Queries) Heartbeat(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, heartbeat, id)
+	return err
+}
+
+const insertIdempotencyKey = `-- name: InsertIdempotencyKey :execrows
+INSERT INTO idempotency_keys(key,job_id) VALUES($1,$2) ON CONFLICT(key) DO NOTHING
+`
+
+type InsertIdempotencyKeyParams struct {
+	Key   string `json:"key"`
+	JobID string `json:"job_id"`
+}
+
+func (q *Queries) InsertIdempotencyKey(ctx context.Context, arg InsertIdempotencyKeyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertIdempotencyKey, arg.Key, arg.JobID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const lockExpired = `-- name: LockExpired :one
+SELECT id, task_type, payload, status, created_at, started_at, completed_at, result, last_error, attempt_count, retry_start, max_retries, timeout_seconds, next_run_at, lease_owner, lease_expires_at, fencing_token FROM jobs WHERE status='RUNNING' AND lease_expires_at<=clock_timestamp()
+ORDER BY lease_expires_at FOR UPDATE SKIP LOCKED LIMIT 1
+`
+
+func (q *Queries) LockExpired(ctx context.Context) (Job, error) {
+	row := q.db.QueryRow(ctx, lockExpired)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.TaskType,
+		&i.Payload,
+		&i.Status,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.LastError,
+		&i.AttemptCount,
+		&i.RetryStart,
+		&i.MaxRetries,
+		&i.TimeoutSeconds,
+		&i.NextRunAt,
+		&i.LeaseOwner,
+		&i.LeaseExpiresAt,
+		&i.FencingToken,
+	)
+	return i, err
+}
+
+const lockOwned = `-- name: LockOwned :one
+SELECT id, task_type, payload, status, created_at, started_at, completed_at, result, last_error, attempt_count, retry_start, max_retries, timeout_seconds, next_run_at, lease_owner, lease_expires_at, fencing_token FROM jobs WHERE id=$1 FOR UPDATE
+`
+
+func (q *Queries) LockOwned(ctx context.Context, id string) (Job, error) {
+	row := q.db.QueryRow(ctx, lockOwned, id)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.TaskType,
+		&i.Payload,
+		&i.Status,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.LastError,
+		&i.AttemptCount,
+		&i.RetryStart,
+		&i.MaxRetries,
+		&i.TimeoutSeconds,
+		&i.NextRunAt,
+		&i.LeaseOwner,
+		&i.LeaseExpiresAt,
+		&i.FencingToken,
+	)
+	return i, err
+}
+
+const manualRetry = `-- name: ManualRetry :one
+UPDATE jobs SET status='QUEUED',retry_start=attempt_count,started_at=NULL,completed_at=NULL,result=NULL,
+ next_run_at=clock_timestamp() WHERE id=$1 AND status IN ('FAILED','DEAD_LETTER') RETURNING id, task_type, payload, status, created_at, started_at, completed_at, result, last_error, attempt_count, retry_start, max_retries, timeout_seconds, next_run_at, lease_owner, lease_expires_at, fencing_token
+`
+
+func (q *Queries) ManualRetry(ctx context.Context, id string) (Job, error) {
+	row := q.db.QueryRow(ctx, manualRetry, id)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.TaskType,
+		&i.Payload,
+		&i.Status,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.LastError,
+		&i.AttemptCount,
+		&i.RetryStart,
+		&i.MaxRetries,
+		&i.TimeoutSeconds,
+		&i.NextRunAt,
+		&i.LeaseOwner,
+		&i.LeaseExpiresAt,
+		&i.FencingToken,
+	)
+	return i, err
+}
+
+const renewLease = `-- name: RenewLease :execrows
+UPDATE jobs SET lease_expires_at=clock_timestamp()+$2::bigint * interval '1 millisecond'
+WHERE id=$1 AND status='RUNNING' AND lease_owner=$3 AND fencing_token=$4 AND lease_expires_at>clock_timestamp()
+`
+
+type RenewLeaseParams struct {
+	ID      string      `json:"id"`
+	LeaseMs int64       `json:"lease_ms"`
+	Owner   pgtype.Text `json:"owner"`
+	Token   int64       `json:"token"`
+}
+
+func (q *Queries) RenewLease(ctx context.Context, arg RenewLeaseParams) (int64, error) {
+	result, err := q.db.Exec(ctx, renewLease,
+		arg.ID,
+		arg.LeaseMs,
+		arg.Owner,
+		arg.Token,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

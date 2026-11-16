@@ -149,7 +149,7 @@ func TestDurableAPISubmissionAndWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	outcome := await(t, s, failed.ID, "FAILED")
+	outcome := await(t, s, failed.ID, "DEAD_LETTER")
 	if outcome.LastError == nil || *outcome.LastError != "integer addition overflow" {
 		t.Fatalf("failure=%+v", outcome)
 	}
@@ -206,10 +206,10 @@ func TestClaimAndTerminalTransitions(t *testing.T) {
 	if claims != 1 {
 		t.Fatalf("claims=%d", claims)
 	}
-	if err := s.Complete(ctx, j.ID, json.RawMessage(`{"sum":3}`)); err != nil {
+	if err := s.Complete(ctx, owned(t, s, j.ID), json.RawMessage(`{"sum":3}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Fail(ctx, j.ID, "late failure"); !errors.Is(err, jobs.ErrInvalidTransition) {
+	if err := s.Fail(ctx, owned(t, s, j.ID), "late failure"); !errors.Is(err, jobs.ErrInvalidTransition) {
 		t.Fatalf("terminal mutation: %v", err)
 	}
 	if _, err := pool.Exec(ctx, "UPDATE jobs SET status='QUEUED', started_at=NULL, completed_at=NULL, result=NULL WHERE id=$1", j.ID); err == nil {
@@ -349,7 +349,7 @@ func assertHistory(t *testing.T, pool *pgxpool.Pool, count int) {
 	t.Helper()
 	var total, mismatches int
 	err := pool.QueryRow(context.Background(), `SELECT count(*), count(*) FILTER (WHERE
- a.status <> j.status OR a.started_at <> j.started_at OR
+ a.status <> CASE WHEN j.status='DEAD_LETTER' THEN 'FAILED' ELSE j.status END OR a.started_at <> j.started_at OR
  a.completed_at IS DISTINCT FROM j.completed_at OR a.result IS DISTINCT FROM j.result OR
  a.last_error IS DISTINCT FROM j.last_error OR a.attempt_number <> 1 OR a.worker_id = '')
  FROM jobs j JOIN job_attempts a ON a.job_id=j.id`).Scan(&total, &mismatches)
@@ -424,7 +424,7 @@ func TestDistributedConcurrencyAndHistory(t *testing.T) {
 	for n, id := range ids {
 		status := "COMPLETED"
 		if n%2 == 1 {
-			status = "FAILED"
+			status = "DEAD_LETTER"
 		}
 		await(t, s, id, status)
 	}
@@ -488,7 +488,7 @@ func TestConcurrentShutdownDrainsOnlyClaimedJobs(t *testing.T) {
 		t.Fatal("shutdown did not drain")
 	}
 	var queued, terminal int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE status='QUEUED'),count(*) FILTER (WHERE status IN ('COMPLETED','FAILED')) FROM jobs`).Scan(&queued, &terminal); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE status='QUEUED'),count(*) FILTER (WHERE status IN ('COMPLETED','DEAD_LETTER')) FROM jobs`).Scan(&queued, &terminal); err != nil {
 		t.Fatal(err)
 	}
 	if queued != 3 || terminal != 3 {
@@ -528,8 +528,8 @@ func TestAttemptWritesAreAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, finish := range []func() error{
-		func() error { return s.Complete(ctx, j.ID, json.RawMessage(`{"sum":3}`)) },
-		func() error { return s.Fail(ctx, j.ID, "failure") },
+		func() error { return s.Complete(ctx, owned(t, s, j.ID), json.RawMessage(`{"sum":3}`)) },
+		func() error { return s.Fail(ctx, owned(t, s, j.ID), "failure") },
 	} {
 		if err := finish(); err == nil {
 			t.Fatal("accepted failed history update")
@@ -543,7 +543,7 @@ func TestAttemptWritesAreAtomic(t *testing.T) {
 	if _, err = pool.Exec(ctx, "DROP TRIGGER reject_attempt ON job_attempts"); err != nil {
 		t.Fatal(err)
 	}
-	if err = s.Complete(ctx, j.ID, json.RawMessage(`{"sum":3}`)); err != nil {
+	if err = s.Complete(ctx, owned(t, s, j.ID), json.RawMessage(`{"sum":3}`)); err != nil {
 		t.Fatal(err)
 	}
 	assertHistory(t, pool, 1)
@@ -579,12 +579,20 @@ func TestAttemptMigrationBackfillsLegacyJobs(t *testing.T) {
 	pool, _ := database(t)
 	s := store.New(pool)
 	ctx := context.Background()
-	// Recreate the Milestone 1 state before applying the new migration.
-	if _, err := pool.Exec(ctx, "DROP TABLE job_attempts"); err != nil {
+	// Recreate the Milestone 1 schema before applying migrations 2 and 3.
+	if _, err := pool.Exec(ctx, "DROP TABLE idempotency_keys,workers,job_attempts,jobs CASCADE; DROP FUNCTION enforce_job_transition()"); err != nil {
+		t.Fatal(err)
+	}
+	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000001_jobs.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, string(migration)); err != nil {
 		t.Fatal(err)
 	}
 	for _, status := range []string{"QUEUED", "RUNNING", "COMPLETED", "FAILED"} {
-		j, err := s.Create(ctx, "add_numbers", json.RawMessage(`{"a":1,"b":2}`))
+		j := jobs.Job{ID: "legacy-" + status}
+		_, err := pool.Exec(ctx, `INSERT INTO jobs(id,task_type,payload) VALUES($1,'add_numbers','{"a":1,"b":2}')`, j.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -611,6 +619,13 @@ func TestAttemptMigrationBackfillsLegacyJobs(t *testing.T) {
 	if _, err = pool.Exec(ctx, string(sql)); err != nil {
 		t.Fatal(err)
 	}
+	migration, err = os.ReadFile(filepath.Join("..", "..", "migrations", "000003_reliability.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, string(migration)); err != nil {
+		t.Fatal(err)
+	}
 	assertHistory(t, pool, 3)
 	var legacy int
 	if err = pool.QueryRow(ctx, "SELECT count(*) FROM job_attempts WHERE worker_id='legacy-unknown'").Scan(&legacy); err != nil || legacy != 3 {
@@ -620,7 +635,7 @@ func TestAttemptMigrationBackfillsLegacyJobs(t *testing.T) {
 	if err = pool.QueryRow(ctx, "SELECT id FROM jobs WHERE status='RUNNING'").Scan(&running); err != nil {
 		t.Fatal(err)
 	}
-	if err = s.Complete(ctx, running, json.RawMessage(`{"sum":3}`)); err != nil {
+	if err = s.Recover(ctx); err != nil {
 		t.Fatal(err)
 	}
 	assertHistory(t, pool, 3)
@@ -628,4 +643,13 @@ func TestAttemptMigrationBackfillsLegacyJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertHistory(t, pool, 4)
+}
+
+func owned(t *testing.T, s *store.Store, id string) jobs.Job {
+	t.Helper()
+	j, err := s.Get(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return j
 }

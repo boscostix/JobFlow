@@ -38,6 +38,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	lease, err := config.Duration("WORKER_LEASE_DURATION", 10*time.Second)
+	if err != nil {
+		return err
+	}
+	if lease < 30*time.Millisecond {
+		return fmt.Errorf("WORKER_LEASE_DURATION must be at least 30ms")
+	}
 	concurrency, err := config.Concurrency()
 	if err != nil {
 		return err
@@ -54,7 +61,7 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	w := worker.Worker{ID: workerID, Concurrency: concurrency, Store: store.New(pool), Registry: tasks.DefaultRegistry(), Log: logger, PollInterval: poll}
+	w := worker.Worker{ID: workerID, Concurrency: concurrency, LeaseDuration: lease, Store: store.NewWithLease(pool, lease), Registry: tasks.DefaultRegistry(), Log: logger, PollInterval: poll}
 	return runWorker(ctx, grace, w.Run, pool.Close)
 }
 
@@ -75,7 +82,7 @@ func runWorker(ctx context.Context, grace time.Duration, run func(context.Contex
 			closePool()
 			return err
 		case <-timer.C:
-			return fmt.Errorf("shutdown exceeded %s; in-flight jobs may remain RUNNING", grace)
+			return fmt.Errorf("shutdown exceeded %s; in-flight jobs will recover after lease expiry", grace)
 		}
 	}
 }

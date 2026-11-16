@@ -8,16 +8,29 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type IdempotencyKey struct {
+	Key   string `json:"key"`
+	JobID string `json:"job_id"`
+}
+
 type Job struct {
-	ID          string             `json:"id"`
-	TaskType    string             `json:"task_type"`
-	Payload     []byte             `json:"payload"`
-	Status      string             `json:"status"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	StartedAt   pgtype.Timestamptz `json:"started_at"`
-	CompletedAt pgtype.Timestamptz `json:"completed_at"`
-	Result      []byte             `json:"result"`
-	LastError   pgtype.Text        `json:"last_error"`
+	ID             string             `json:"id"`
+	TaskType       string             `json:"task_type"`
+	Payload        []byte             `json:"payload"`
+	Status         string             `json:"status"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	StartedAt      pgtype.Timestamptz `json:"started_at"`
+	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	Result         []byte             `json:"result"`
+	LastError      pgtype.Text        `json:"last_error"`
+	AttemptCount   int32              `json:"attempt_count"`
+	RetryStart     int32              `json:"retry_start"`
+	MaxRetries     int32              `json:"max_retries"`
+	TimeoutSeconds int32              `json:"timeout_seconds"`
+	NextRunAt      pgtype.Timestamptz `json:"next_run_at"`
+	LeaseOwner     pgtype.Text        `json:"lease_owner"`
+	LeaseExpiresAt pgtype.Timestamptz `json:"lease_expires_at"`
+	FencingToken   int64              `json:"fencing_token"`
 }
 
 type JobAttempt struct {
@@ -29,4 +42,11 @@ type JobAttempt struct {
 	CompletedAt   pgtype.Timestamptz `json:"completed_at"`
 	Result        []byte             `json:"result"`
 	LastError     pgtype.Text        `json:"last_error"`
+	FencingToken  int64              `json:"fencing_token"`
+}
+
+type Worker struct {
+	ID          string             `json:"id"`
+	StartedAt   pgtype.Timestamptz `json:"started_at"`
+	HeartbeatAt pgtype.Timestamptz `json:"heartbeat_at"`
 }

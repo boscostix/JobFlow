@@ -20,7 +20,7 @@ type fakeStore struct {
 	err     error
 }
 
-func (s *fakeStore) Create(context.Context, string, json.RawMessage) (jobs.Job, error) {
+func (s *fakeStore) Submit(context.Context, string, json.RawMessage, jobs.Options) (jobs.Job, error) {
 	s.creates++
 	return jobs.Job{ID: "job_test", Status: "QUEUED"}, s.err
 }
@@ -44,9 +44,9 @@ func TestSubmissionValidation(t *testing.T) {
 		{"case alias payload", `{"type":"add_numbers","payload":{"a":1,"A":2,"b":3}}`, "", 400},
 		{"unknown task", `{"type":"unknown","payload":{}}`, "", 400},
 		{"invalid payload", `{"type":"add_numbers","payload":{"a":1}}`, "", 400},
-		{"unsupported retry", `{"type":"add_numbers","payload":{"a":1,"b":2},"max_retries":3}`, "", 400},
+		{"supported retry", `{"type":"add_numbers","payload":{"a":1,"b":2},"max_retries":3}`, "", 202},
 		{"trailing JSON", valid + ` {}`, "", 400},
-		{"idempotency", valid, "key", 400},
+		{"idempotency", valid, "key", 202},
 		{"large body", strings.Repeat(" ", int(MaxBodyBytes)) + valid, "", 413},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -97,6 +97,52 @@ func TestStorageErrors(t *testing.T) {
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/health", nil))
 	if w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+}
+
+func (s *fakeStore) Retry(context.Context, string) (jobs.Job, error) {
+	return jobs.Job{ID: "job_test", Status: "QUEUED"}, s.err
+}
+
+func TestReliabilityValidationAndErrors(t *testing.T) {
+	for _, options := range []string{`"max_retries":-1`, `"max_retries":101`, `"max_retries":1.5`, `"timeout_seconds":0`, `"timeout_seconds":86401`, `"timeout_seconds":"1"`} {
+		s := &fakeStore{}
+		h := New(s, tasks.DefaultRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("POST", "/api/v1/jobs", strings.NewReader(`{"type":"add_numbers","payload":{"a":1,"b":2},`+options+`}`)))
+		if w.Code != 400 || s.creates != 0 {
+			t.Fatalf("%s status=%d creates=%d", options, w.Code, s.creates)
+		}
+	}
+	for _, key := range []string{"", "two words", strings.Repeat("x", 201)} {
+		s := &fakeStore{}
+		h := New(s, tasks.DefaultRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		req := httptest.NewRequest("POST", "/api/v1/jobs", strings.NewReader(`{"type":"add_numbers","payload":{"a":1,"b":2}}`))
+		req.Header.Set("Idempotency-Key", key)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != 400 || s.creates != 0 {
+			t.Fatalf("key %q status %d", key, w.Code)
+		}
+	}
+	s := &fakeStore{}
+	h := New(s, tasks.DefaultRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	for _, tc := range []struct {
+		err  error
+		code int
+	}{{nil, 202}, {jobs.ErrNotFound, 404}, {jobs.ErrInvalidTransition, 409}, {errors.New("offline"), 503}} {
+		s.err = tc.err
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("POST", "/api/v1/jobs/job_test/retry", nil))
+		if w.Code != tc.code {
+			t.Fatalf("retry %v: %d", tc.err, w.Code)
+		}
+	}
+	s.err = jobs.ErrIdempotencyConflict
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("POST", "/api/v1/jobs", strings.NewReader(`{"type":"add_numbers","payload":{"a":1,"b":2}}`)))
+	if w.Code != 409 {
 		t.Fatal(w.Code)
 	}
 }

@@ -102,3 +102,19 @@ func (AddNumbers) Execute(ctx context.Context, raw json.RawMessage) (json.RawMes
 		Sum int64 `json:"sum"`
 	}{a + b})
 }
+
+// Execution exposes the stable job ID for handler-side effect deduplication.
+// The fencing token only protects external effects if the external system enforces it.
+type Execution struct {
+	JobID        string
+	FencingToken int64
+}
+type executionKey struct{}
+
+func WithExecution(ctx context.Context, e Execution) context.Context {
+	return context.WithValue(ctx, executionKey{}, e)
+}
+func ExecutionFromContext(ctx context.Context) (Execution, bool) {
+	e, ok := ctx.Value(executionKey{}).(Execution)
+	return e, ok
+}

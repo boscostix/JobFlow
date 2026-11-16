@@ -15,16 +15,21 @@ import (
 
 type Store interface {
 	Claim(context.Context, string) (jobs.Job, error)
-	Complete(context.Context, string, json.RawMessage) error
-	Fail(context.Context, string, string) error
+	Complete(context.Context, jobs.Job, json.RawMessage) error
+	Fail(context.Context, jobs.Job, string) error
+
+	Renew(context.Context, jobs.Job) error
+	Recover(context.Context) error
+	Heartbeat(context.Context, string) error
 }
 type Worker struct {
-	ID           string
-	Concurrency  int
-	Store        Store
-	Registry     tasks.Registry
-	Log          *slog.Logger
-	PollInterval time.Duration
+	LeaseDuration time.Duration
+	ID            string
+	Concurrency   int
+	Store         Store
+	Registry      tasks.Registry
+	Log           *slog.Logger
+	PollInterval  time.Duration
 }
 
 // Run starts a fixed number of slots. Each slot claims only when it can execute,
@@ -41,6 +46,17 @@ func (w Worker) Run(ctx context.Context) error {
 	if w.ID == "" {
 		return errors.New("worker ID is required")
 	}
+	if w.LeaseDuration == 0 {
+		w.LeaseDuration = 10 * time.Second
+	}
+	if w.LeaseDuration < 3*time.Millisecond {
+		return errors.New("lease must be at least 3ms")
+	}
+	// Keep maintenance alive while in-flight handlers drain after shutdown.
+	maintenanceCtx, endMaintenance := context.WithCancel(context.Background())
+	maintenanceDone := make(chan struct{})
+	go func() { defer close(maintenanceDone); w.maintain(maintenanceCtx) }()
+	defer func() { endMaintenance(); <-maintenanceDone }()
 	claimCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	var wg sync.WaitGroup
@@ -90,7 +106,64 @@ func (w Worker) runSlot(ctx context.Context) error {
 		}
 	}
 }
+func (w Worker) maintain(ctx context.Context) {
+	s := w.Store
+	ticker := time.NewTicker(w.LeaseDuration / 3)
+	defer ticker.Stop()
+	for {
+		opCtx, cancel := context.WithTimeout(ctx, w.LeaseDuration/3)
+		if err := s.Heartbeat(opCtx, w.ID); err != nil && ctx.Err() == nil {
+			w.Log.Error("heartbeat failed", "error", err)
+		}
+		cancel()
+		opCtx, cancel = context.WithTimeout(ctx, w.LeaseDuration/3)
+		if err := s.Recover(opCtx); err != nil && ctx.Err() == nil {
+			w.Log.Error("recovery failed", "error", err)
+		}
+		cancel()
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
 func (w Worker) execute(ctx context.Context, j jobs.Job) error {
+	timeout := time.Duration(j.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 300 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(tasks.WithExecution(ctx, tasks.Execution{JobID: j.ID, FencingToken: j.FencingToken}), timeout)
+	defer cancel()
+	// Execute synchronously: a noncooperative handler retains its slot. Once its
+	// deadline passes renewal stops, allowing another process to recover the job.
+	renewCtx, stopRenew := context.WithCancel(ctx)
+	renewed := make(chan struct{})
+	go func() {
+		defer close(renewed)
+		s := w.Store
+		lease := w.LeaseDuration
+		if lease == 0 {
+			lease = 10 * time.Second
+		}
+		ticker := time.NewTicker(lease / 3)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-renewCtx.Done():
+				return
+			case <-ticker.C:
+				opCtx, done := context.WithTimeout(renewCtx, lease/3)
+				err := s.Renew(opCtx, j)
+				done()
+				if err != nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
 	w.Log.Info("job started", "worker_id", w.ID, "job_id", j.ID, "task_type", j.TaskType)
 	h, ok := w.Registry[j.TaskType]
 	var result json.RawMessage
@@ -100,6 +173,11 @@ func (w Worker) execute(ctx context.Context, j jobs.Job) error {
 	} else {
 		result, err = invoke(ctx, h, j.Payload)
 	}
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	stopRenew()
+	<-renewed
 	if err == nil && !json.Valid(result) {
 		err = errors.New("handler returned invalid JSON")
 	}
@@ -107,16 +185,20 @@ func (w Worker) execute(ctx context.Context, j jobs.Job) error {
 	defer cancel()
 	var saveErr error
 	if err != nil {
-		saveErr = w.Store.Fail(persistCtx, j.ID, err.Error())
+		saveErr = w.Store.Fail(persistCtx, j, err.Error())
 		w.Log.Error("job failed", "worker_id", w.ID, "job_id", j.ID, "error", err)
 	} else {
-		saveErr = w.Store.Complete(persistCtx, j.ID, result)
+		saveErr = w.Store.Complete(persistCtx, j, result)
 		if saveErr == nil {
 			w.Log.Info("job completed", "worker_id", w.ID, "job_id", j.ID)
 		}
 	}
+	if errors.Is(saveErr, jobs.ErrInvalidTransition) {
+		w.Log.Info("attempt no longer owns job", "job_id", j.ID, "fencing_token", j.FencingToken)
+		return nil
+	}
 	if saveErr != nil {
-		return fmt.Errorf("persist outcome for %s (job may remain RUNNING; handler will not be rerun): %w", j.ID, saveErr)
+		return fmt.Errorf("persist outcome for %s (lease recovery will resolve abandoned state): %w", j.ID, saveErr)
 	}
 	return nil
 }

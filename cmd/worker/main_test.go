@@ -19,12 +19,12 @@ type blockedPersistence struct{ entered, release chan struct{} }
 func (s blockedPersistence) Claim(context.Context, string) (jobs.Job, error) {
 	return jobs.Job{ID: "test", TaskType: "add_numbers", Payload: json.RawMessage(`{"a":1,"b":2}`)}, nil
 }
-func (s blockedPersistence) Complete(context.Context, string, json.RawMessage) error {
+func (s blockedPersistence) Complete(context.Context, jobs.Job, json.RawMessage) error {
 	close(s.entered)
 	<-s.release
 	return nil
 }
-func (s blockedPersistence) Fail(context.Context, string, string) error {
+func (s blockedPersistence) Fail(context.Context, jobs.Job, string) error {
 	panic("unexpected handler failure")
 }
 
@@ -77,3 +77,7 @@ func TestNormalShutdownClosesPool(t *testing.T) {
 		t.Fatalf("err=%v closed=%v", err, closed)
 	}
 }
+
+func (s blockedPersistence) Renew(context.Context, jobs.Job) error   { return nil }
+func (s blockedPersistence) Recover(context.Context) error           { return nil }
+func (s blockedPersistence) Heartbeat(context.Context, string) error { return nil }
