@@ -2,3 +2,6 @@
 bin/
 coverage.out
 .DS_Store
+.venv/
+__pycache__/
+*.egg-info/
