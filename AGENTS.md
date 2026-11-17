@@ -6,7 +6,7 @@ JobFlow is a distributed job execution engine planned in Go and PostgreSQL. Corr
 
 Read [README.md](README.md) for scope, architecture, roadmap, and MVP acceptance criteria, and [CLAUDE.md](CLAUDE.md) for detailed implementation guidance. This file defines the development and review workflow.
 
-Milestones 1–3 have Go entry points under `cmd/api` and `cmd/worker`, backend packages under `internal/`, schema changes under `migrations/`, sqlc source queries under `queries/`, and real PostgreSQL tests under `tests/integration/`. Docker Compose provides local PostgreSQL, explicit migrations, API, and three independent workers with configurable local concurrency. Attempt histories are committed atomically with claims and outcomes. Renewable fenced leases, recovery, retries, timeouts, idempotency, dead letters, and manual retry are implemented. Process crash tests and an isolated multi-worker Compose reliability scenario exist. The Python client, dashboard, load tests, and CI remain planned.
+Milestones 1–4 have Go entry points under `cmd/api` and `cmd/worker`, backend packages under `internal/`, schema changes under `migrations/`, sqlc source queries under `queries/`, and real PostgreSQL tests under `tests/integration/`. Docker Compose provides local PostgreSQL, explicit migrations, API, and three independent workers with configurable local concurrency. Attempt histories are committed atomically with claims and outcomes. Renewable fenced leases, recovery, retries, timeouts, idempotency, dead letters, and manual retry are implemented. Process crash tests and an isolated multi-worker Compose reliability scenario exist. The Python SDK lives in `sdk/python/` and the operator dashboard in `web/`. Load tests and CI remain planned.
 
 ## Agent roles
 
@@ -97,7 +97,8 @@ Use the checks relevant to changed code once the corresponding infrastructure ex
 | Go race detector for concurrency-sensitive changes | `make race` |
 | PostgreSQL integration tests | `TEST_DATABASE_URL=... make integration`; isolated schemas, schema-creation permission required |
 | Targeted worker crash and lease-expiration tests | PostgreSQL integration suite (including killed subprocess); `python3 tests/reliability/compose_recovery.py` for an isolated five-worker scenario |
-| Frontend lint, type checking, and tests | Pending `web/` and configured package scripts |
+| Frontend lint, type checking, build, and tests | In `web/`, use `npm run lint`, `npm run typecheck`, `npm run build`, and `npm test`. Set `JOBFLOW_E2E_URL` to run the live test against Compose. |
+| Python SDK | With the SDK installed, run `python -m unittest discover -s sdk/python/tests -v` |
 | Load tests and benchmarks | Pending application and k6 harness setup |
 | Broader automated regression checks | Run unit/race and PostgreSQL integration suites; CI pending |
 
