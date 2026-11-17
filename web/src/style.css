@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --color-ink: #152827;
+  --color-line: #dce5e2;
+  --color-mist: #f2f6f4;
+  --color-accent: #145b4f;
+}
+
+@layer base {
+  body { @apply m-0 bg-mist text-ink text-sm antialiased; }
+  h1 { @apply text-3xl font-semibold tracking-tight; }
+  h2 { @apply text-xl font-semibold tracking-tight; }
+  h3 { @apply font-semibold; }
+  button { @apply cursor-pointer; }
+  button:disabled { @apply cursor-default opacity-45; }
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+    @apply outline-2 outline-offset-2 outline-accent;
+  }
+  label { @apply grid min-w-0 gap-1.5 text-xs font-semibold; }
+  input, select, textarea {
+    @apply min-w-0 w-full rounded-md border border-line bg-white px-3 py-2 text-sm font-normal text-ink;
+  }
+  table { @apply w-full text-left; }
+  th { @apply bg-mist text-xs font-semibold text-slate-600 whitespace-nowrap; }
+  th, td { @apply px-4 py-3 align-top; }
+  tbody tr { @apply border-t border-line; }
+  tr[data-selected="true"] { @apply bg-teal-50; }
+  pre { @apply my-2 overflow-auto rounded-md bg-mist p-3 text-xs; }
+  dt { @apply text-xs text-slate-600; }
+  dd { @apply mt-1; }
+}
+
+@layer components {
+  .topbar { @apply border-b border-line bg-white; }
+  .topbar-inner { @apply flex min-h-16 items-center gap-8; }
+  .brand { @apply flex items-center gap-2 text-lg font-semibold tracking-tight; }
+  .brand-mark { @apply grid size-7 place-items-center rounded-md bg-accent text-lg text-white; }
+  nav { @apply flex self-stretch gap-5; }
+  nav button { @apply border-b-2 border-transparent px-1 font-medium text-slate-600; }
+  nav button[aria-current="page"] { @apply border-accent text-accent; }
+  .shell { @apply mx-auto max-w-7xl px-4 sm:px-8; }
+  main.shell { @apply pb-12; }
+  .page-heading, .detail-heading { @apply flex flex-wrap items-center justify-between gap-3; }
+  .page-heading { @apply py-7; }
+  .actions { @apply flex flex-wrap items-center gap-2; }
+  .button { @apply rounded-md border border-line bg-white px-3 py-2 font-medium hover:enabled:bg-mist; }
+  .button.primary { @apply border-accent bg-accent text-white hover:enabled:bg-teal-800; }
+  .button.danger { @apply border-red-200 text-red-800 hover:enabled:bg-red-50; }
+  .panel { @apply overflow-hidden rounded-xl border border-line bg-white shadow-sm; }
+  .filters { @apply grid items-end gap-3 p-4 sm:grid-cols-[2fr_1fr_1fr_auto]; }
+  .table-scroll { @apply overflow-x-auto; }
+  .identifier, .job-link { @apply break-all font-mono text-xs; }
+  .job-link { @apply text-left font-semibold text-accent hover:underline; }
+  .status { @apply inline-flex w-max items-center gap-1.5 rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700; }
+  .status span { @apply size-1.5 rounded-full bg-current; }
+  .status[data-status="COMPLETED"], .status[data-status="ONLINE"] { @apply bg-emerald-50 text-emerald-800; }
+  .status[data-status="RUNNING"], .status[data-status="SCHEDULED"] { @apply bg-sky-50 text-sky-800; }
+  .status[data-status="DEAD_LETTER"], .status[data-status="FAILED"] { @apply bg-red-50 text-red-800; }
+  .status[data-status="STALE"], .status[data-status="CANCELLATION_REQUESTED"] { @apply bg-amber-50 text-amber-900; }
+  .notice { @apply p-5 text-slate-600; }
+  .error { @apply text-red-800; }
+  .pagination { @apply flex items-center justify-end gap-2 border-t border-line p-4; }
+  .pagination span { @apply mr-2 text-xs text-slate-600; }
+  .detail, .submit { @apply space-y-4 p-5; }
+  .detail { @apply mt-5; }
+  .submit { @apply mb-5; }
+  .form-grid { @apply grid gap-3 sm:grid-cols-2 lg:grid-cols-[repeat(auto-fit,minmax(12rem,1fr))]; }
+  .metadata { @apply grid gap-4 rounded-lg bg-mist p-4 sm:grid-cols-2 lg:grid-cols-4; }
+  .panel-caption { @apply p-4 text-slate-600; }
+}

@@ -33,6 +33,13 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+  dashboard:
+    build: ./web
+    ports:
+      - "127.0.0.1:${DASHBOARD_PORT:-5173}:8080"
+    depends_on:
+      api:
+        condition: service_started
   worker:
     deploy:
       replicas: 3

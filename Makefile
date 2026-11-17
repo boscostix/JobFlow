@@ -1,14 +1,15 @@
 .PHONY: fmt build test race vet integration generate
+GO_PACKAGES := ./cmd/... ./internal/...
 fmt:
 	gofmt -w cmd internal tests
 build:
-	go build ./...
+	go build $(GO_PACKAGES)
 test:
-	go test ./...
+	go test $(GO_PACKAGES)
 race:
-	go test -race ./...
+	go test -race $(GO_PACKAGES)
 vet:
-	go vet ./...
+	go vet $(GO_PACKAGES)
 integration:
 	go test -tags=integration -count=1 ./tests/integration
 generate:
