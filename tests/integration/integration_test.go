@@ -282,7 +282,7 @@ func TestInvalidRequestDoesNotPersist(t *testing.T) {
 	s := store.New(pool)
 	server := httptest.NewServer(api.New(s, tasks.DefaultRegistry(), logger()))
 	defer server.Close()
-	for _, body := range []string{`{"Type":"add_numbers","payload":{"a":1,"b":2}}`, `{"type":"add_numbers","payload":{"a":null,"A":1,"b":2}}`, `{"type":"add_numbers","payload":{"a":1,"A":2,"b":3}}`, `{"type":"add_numbers","payload":{"a":1,"a":2,"b":3}}`, `{}`, `{"type":"add_numbers","payload":{"a":1}}`, `{"type":"add_numbers","payload":{"a":1,"b":2},"scheduled_at":"2026-12-01T09:00:00Z"}`} {
+	for _, body := range []string{`{"Type":"add_numbers","payload":{"a":1,"b":2}}`, `{"type":"add_numbers","payload":{"a":null,"A":1,"b":2}}`, `{"type":"add_numbers","payload":{"a":1,"A":2,"b":3}}`, `{"type":"add_numbers","payload":{"a":1,"a":2,"b":3}}`, `{}`, `{"type":"add_numbers","payload":{"a":1}}`, `{"type":"add_numbers","payload":{"a":1,"b":2},"scheduled_at":"2026-12-01T09:00:00"}`} {
 		resp, err := http.Post(server.URL+"/api/v1/jobs", "application/json", bytes.NewBufferString(body))
 		if err != nil {
 			t.Fatal(err)
@@ -579,7 +579,7 @@ func TestAttemptMigrationBackfillsLegacyJobs(t *testing.T) {
 	pool, _ := database(t)
 	s := store.New(pool)
 	ctx := context.Background()
-	// Recreate the Milestone 1 schema before applying migrations 2 and 3.
+	// Recreate the Milestone 1 schema before applying the subsequent migrations.
 	if _, err := pool.Exec(ctx, "DROP TABLE idempotency_keys,workers,job_attempts,jobs CASCADE; DROP FUNCTION enforce_job_transition()"); err != nil {
 		t.Fatal(err)
 	}
@@ -620,6 +620,13 @@ func TestAttemptMigrationBackfillsLegacyJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	migration, err = os.ReadFile(filepath.Join("..", "..", "migrations", "000003_reliability.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, string(migration)); err != nil {
+		t.Fatal(err)
+	}
+	migration, err = os.ReadFile(filepath.Join("..", "..", "migrations", "000004_developer_experience.up.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}

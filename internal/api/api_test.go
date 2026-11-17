@@ -16,6 +16,7 @@ import (
 )
 
 type fakeStore struct {
+	Store
 	creates int
 	err     error
 }

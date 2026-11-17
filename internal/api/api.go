@@ -21,6 +21,10 @@ type Store interface {
 	Get(context.Context, string) (jobs.Job, error)
 	Ping(context.Context) error
 	Retry(context.Context, string) (jobs.Job, error)
+	Cancel(context.Context, string) (jobs.Job, error)
+	List(context.Context, jobs.ListOptions) ([]jobs.Job, error)
+	Attempts(context.Context, string) ([]jobs.Attempt, error)
+	Workers(context.Context) ([]jobs.WorkerStatus, error)
 }
 type server struct {
 	store    Store
@@ -32,6 +36,10 @@ func New(store Store, registry tasks.Registry, logger *slog.Logger) http.Handler
 	s := server{store, registry, logger}
 	r := chi.NewRouter()
 	r.Post("/api/v1/jobs", s.submit)
+	r.Get("/api/v1/jobs", s.list)
+	r.Get("/api/v1/jobs/{id}/attempts", s.attempts)
+	r.Post("/api/v1/jobs/{id}/cancel", s.cancel)
+	r.Get("/api/v1/workers", s.workers)
 	r.Get("/api/v1/jobs/{id}", s.get)
 	r.Get("/health", s.health)
 	r.Post("/api/v1/jobs/{id}/retry", s.retry)
@@ -75,9 +83,10 @@ func (s server) submit(w http.ResponseWriter, r *http.Request) {
 		Type           string          `json:"type"`
 		Payload        json.RawMessage `json:"payload"`
 		MaxRetries     *int32          `json:"max_retries"`
+		ScheduledAt    *string         `json:"scheduled_at"`
 		TimeoutSeconds *int32          `json:"timeout_seconds"`
 	}
-	if err := tasks.Decode(raw, &req, "type", "payload", "max_retries", "timeout_seconds"); err != nil {
+	if err := tasks.Decode(raw, &req, "type", "payload", "max_retries", "timeout_seconds", "scheduled_at"); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request: "+err.Error())
 		return
 	}
@@ -87,6 +96,13 @@ func (s server) submit(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.TimeoutSeconds != nil {
 		o.TimeoutSeconds = *req.TimeoutSeconds
+	}
+	if req.ScheduledAt != nil {
+		o.ScheduledAt, err = parseSchedule(*req.ScheduledAt)
+		if err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
 	}
 	if err := o.Validate(); err != nil {
 		writeError(w, 400, err.Error())

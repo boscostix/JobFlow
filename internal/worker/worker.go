@@ -133,8 +133,10 @@ func (w Worker) execute(ctx context.Context, j jobs.Job) error {
 	if timeout <= 0 {
 		timeout = 300 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(tasks.WithExecution(ctx, tasks.Execution{JobID: j.ID, FencingToken: j.FencingToken}), timeout)
-	defer cancel()
+	ctx, expire := context.WithTimeout(tasks.WithExecution(ctx, tasks.Execution{JobID: j.ID, FencingToken: j.FencingToken}), timeout)
+	defer expire()
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	// Execute synchronously: a noncooperative handler retains its slot. Once its
 	// deadline passes renewal stops, allowing another process to recover the job.
 	renewCtx, stopRenew := context.WithCancel(ctx)
@@ -157,7 +159,7 @@ func (w Worker) execute(ctx context.Context, j jobs.Job) error {
 				err := s.Renew(opCtx, j)
 				done()
 				if err != nil {
-					cancel()
+					cancel(err)
 					return
 				}
 			}
@@ -175,23 +177,24 @@ func (w Worker) execute(ctx context.Context, j jobs.Job) error {
 	}
 	if ctx.Err() != nil {
 		err = ctx.Err()
+		if errors.Is(context.Cause(ctx), jobs.ErrCancellationRequested) {
+			err = jobs.ErrCancellationRequested
+		}
 	}
 	stopRenew()
 	<-renewed
 	if err == nil && !json.Valid(result) {
 		err = errors.New("handler returned invalid JSON")
 	}
-	persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	persistCtx, endPersist := context.WithTimeout(context.Background(), 5*time.Second)
+	defer endPersist()
 	var saveErr error
 	if err != nil {
 		saveErr = w.Store.Fail(persistCtx, j, err.Error())
-		w.Log.Error("job failed", "worker_id", w.ID, "job_id", j.ID, "error", err)
+		w.Log.Info("handler returned an error", "worker_id", w.ID, "job_id", j.ID, "error", err)
 	} else {
 		saveErr = w.Store.Complete(persistCtx, j, result)
-		if saveErr == nil {
-			w.Log.Info("job completed", "worker_id", w.ID, "job_id", j.ID)
-		}
+
 	}
 	if errors.Is(saveErr, jobs.ErrInvalidTransition) {
 		w.Log.Info("attempt no longer owns job", "job_id", j.ID, "fencing_token", j.FencingToken)
@@ -200,6 +203,7 @@ func (w Worker) execute(ctx context.Context, j jobs.Job) error {
 	if saveErr != nil {
 		return fmt.Errorf("persist outcome for %s (lease recovery will resolve abandoned state): %w", j.ID, saveErr)
 	}
+	w.Log.Info("attempt outcome persisted", "worker_id", w.ID, "job_id", j.ID, "fencing_token", j.FencingToken)
 	return nil
 }
 func invoke(ctx context.Context, h tasks.Handler, payload json.RawMessage) (result json.RawMessage, err error) {

@@ -48,7 +48,11 @@ func (s *Store) Submit(ctx context.Context, task string, payload json.RawMessage
 	}
 	defer tx.Rollback(context.Background())
 	q := s.queries.WithTx(tx)
-	j, err := q.CreateJob(ctx, db.CreateJobParams{ID: "job_" + hex.EncodeToString(id[:]), TaskType: task, Payload: payload, MaxRetries: o.MaxRetries, TimeoutSeconds: o.TimeoutSeconds})
+	var scheduled pgtype.Timestamptz
+	if o.ScheduledAt != nil {
+		scheduled = pgtype.Timestamptz{Time: o.ScheduledAt.UTC(), Valid: true}
+	}
+	j, err := q.CreateJob(ctx, db.CreateJobParams{ID: "job_" + hex.EncodeToString(id[:]), TaskType: task, Payload: payload, MaxRetries: o.MaxRetries, TimeoutSeconds: o.TimeoutSeconds, ScheduledAt: scheduled})
 	if err != nil {
 		return jobs.Job{}, err
 	}
@@ -62,7 +66,7 @@ func (s *Store) Submit(ctx context.Context, task string, payload json.RawMessage
 			if err != nil {
 				return jobs.Job{}, err
 			}
-			same, err := q.EquivalentSubmission(ctx, db.EquivalentSubmissionParams{ID: original.ID, TaskType: task, Column3: payload, MaxRetries: o.MaxRetries, TimeoutSeconds: o.TimeoutSeconds})
+			same, err := q.EquivalentSubmission(ctx, db.EquivalentSubmissionParams{ID: original.ID, TaskType: task, Column3: payload, MaxRetries: o.MaxRetries, TimeoutSeconds: o.TimeoutSeconds, ScheduledAt: scheduled})
 			if err != nil {
 				return jobs.Job{}, err
 			}
@@ -163,7 +167,10 @@ func (s *Store) finishLocked(ctx context.Context, q *db.Queries, j db.Job, resul
 	status, attemptStatus := "COMPLETED", "COMPLETED"
 	var lastError pgtype.Text
 	var delay time.Duration
-	if result == nil {
+	if j.CancelRequestedAt.Valid {
+		status, attemptStatus = "CANCELLED", "CANCELLED"
+		result = nil
+	} else if result == nil {
 		lastError = text(message)
 		status, attemptStatus = "DEAD_LETTER", "FAILED"
 		if j.AttemptCount-j.RetryStart <= j.MaxRetries {
@@ -198,10 +205,15 @@ func (s *Store) Renew(ctx context.Context, j jobs.Job) error {
 	}
 	defer tx.Rollback(context.Background())
 	q := s.queries.WithTx(tx)
-	if _, err = q.LockOwned(ctx, j.ID); errors.Is(err, pgx.ErrNoRows) {
+	locked, err := q.LockOwned(ctx, j.ID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return jobs.ErrInvalidTransition
 	} else if err != nil {
 		return err
+	}
+	if locked.Status == "RUNNING" && locked.LeaseOwner.String == j.LeaseOwner &&
+		locked.FencingToken == j.FencingToken && locked.CancelRequestedAt.Valid {
+		return jobs.ErrCancellationRequested
 	}
 	n, err := q.RenewLease(ctx, db.RenewLeaseParams{ID: j.ID, Owner: text(j.LeaseOwner), Token: j.FencingToken, LeaseMs: s.lease.Milliseconds()})
 	if err != nil {
@@ -252,22 +264,28 @@ func (s *Store) Retry(ctx context.Context, id string) (jobs.Job, error) {
 	return convert(j), err
 }
 func convert(j db.Job) jobs.Job {
-	out := jobs.Job{ID: j.ID, TaskType: j.TaskType, Payload: j.Payload, Status: j.Status, CreatedAt: j.CreatedAt.Time, Result: j.Result, AttemptCount: j.AttemptCount, MaxRetries: j.MaxRetries, TimeoutSeconds: j.TimeoutSeconds, NextRunAt: j.NextRunAt.Time, LeaseOwner: j.LeaseOwner.String, FencingToken: j.FencingToken}
-	if j.StartedAt.Valid {
-		t := j.StartedAt.Time
-		out.StartedAt = &t
+	return jobs.Job{
+		ID: j.ID, TaskType: j.TaskType, Payload: j.Payload, Status: j.Status,
+		CreatedAt: j.CreatedAt.Time.UTC(), StartedAt: optionalTime(j.StartedAt),
+		CompletedAt: optionalTime(j.CompletedAt), Result: j.Result, LastError: optionalText(j.LastError),
+		AttemptCount: j.AttemptCount, MaxRetries: j.MaxRetries, TimeoutSeconds: j.TimeoutSeconds,
+		NextRunAt: j.NextRunAt.Time.UTC(), ScheduledAt: optionalTime(j.ScheduledAt),
+		CancelRequestedAt: optionalTime(j.CancelRequestedAt), LeaseOwner: j.LeaseOwner.String,
+		LeaseExpiresAt: optionalTime(j.LeaseExpiresAt), FencingToken: j.FencingToken,
 	}
-	if j.CompletedAt.Valid {
-		t := j.CompletedAt.Time
-		out.CompletedAt = &t
+}
+
+func optionalTime(t pgtype.Timestamptz) *time.Time {
+	if !t.Valid {
+		return nil
 	}
-	if j.LeaseExpiresAt.Valid {
-		t := j.LeaseExpiresAt.Time
-		out.LeaseExpiresAt = &t
+	value := t.Time.UTC()
+	return &value
+}
+
+func optionalText(t pgtype.Text) *string {
+	if !t.Valid {
+		return nil
 	}
-	if j.LastError.Valid {
-		v := j.LastError.String
-		out.LastError = &v
-	}
-	return out
+	return &t.String
 }
