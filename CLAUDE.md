@@ -90,7 +90,7 @@ Validate the complete Docker Compose scenario with five workers, terminate two d
 
 Measure queue latency, throughput, retry rates, recovery time, and scaling with increasing worker count. The initial targets are 10,000+ jobs/hour, 5-10 workers, zero lost accepted jobs, and recovery under 30 seconds. Report workload, hardware, and lease/detection configuration alongside measured results.
 
-Available checks: `make fmt`, `make build`, `make vet`, `make test`, `make race`, and `TEST_DATABASE_URL=... make integration`. Integration tests use isolated PostgreSQL schemas and require schema-creation permission; they do not truncate existing tables. `make generate` regenerates sqlc code. See the README for startup and migration commands. Run checks appropriate to each implemented change. Lease/crash reliability checks exist in the PostgreSQL integration suite and `tests/reliability/compose_recovery.py`; README documents the SDK and dashboard checks. Load tests and CI remain pending.
+Available checks: `make fmt`, `make build`, `make vet`, `make test`, `make race`, and `TEST_DATABASE_URL=... make integration`. Integration tests use isolated PostgreSQL schemas and require schema-creation permission; they do not truncate existing tables. `make generate` regenerates sqlc code. See the README for startup and migration commands. Run checks appropriate to each implemented change. Lease/crash reliability checks exist in the PostgreSQL integration suite and `tests/reliability/compose_recovery.py`; README documents the SDK and dashboard checks. Milestone 6 adds `python3 tests/load/benchmark.py` and GitHub Actions. See [benchmark methodology and results](docs/benchmarks.md) and [architecture](docs/architecture.md).
 
 ## Scope boundaries
 

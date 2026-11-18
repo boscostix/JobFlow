@@ -1,8 +1,10 @@
 # JobFlow
 
-A fault-tolerant, horizontally scalable distributed job execution platform built in Go. JobFlow will let developers submit, schedule, execute, retry, and monitor asynchronous background tasks across multiple workers through a REST API and lightweight Python SDK.
+A fault-tolerant, horizontally scalable distributed job execution platform built in Go. JobFlow lets developers submit, schedule, execute, retry, and monitor asynchronous background tasks across multiple workers through a REST API and lightweight Python SDK.
 
-**Status: Milestones 1–5 implemented.** JobFlow supports durable submission, fenced leases and recovery, scheduling, cooperative cancellation, and operator workflows through the REST API, Python SDK, and dashboard. Prometheus metrics and structured logs support fault diagnosis. Benchmarking and CI remain on the roadmap.
+**Status: Milestones 1–6 implemented.** JobFlow supports durable submission, fenced leases and recovery, scheduling, cooperative cancellation, and operator workflows through the REST API, Python SDK, and dashboard. Prometheus metrics and structured logs support fault diagnosis. The MVP includes a repeatable benchmark suite and GitHub Actions checks.
+
+[Architecture and design decisions](docs/architecture.md) · [Benchmarks and recovery](docs/benchmarks.md) · [CI workflow](.github/workflows/ci.yml) · [MIT license](LICENSE)
 
 ## Run locally
 
@@ -56,7 +58,13 @@ SQL queries live in `queries/jobs.sql`; generated pgx code is checked into `inte
 
 For host processes, set `DATABASE_URL` and optionally `API_ADDR`, `WORKER_CONCURRENCY`, `WORKER_POLL_INTERVAL`, `WORKER_SHUTDOWN_TIMEOUT`, and `WORKER_LEASE_DURATION`, then use `go run ./cmd/api` and `go run ./cmd/worker` in separate terminals. Start more worker processes in additional terminals; each receives a random process-lifetime worker ID. The `.env` file is consumed by Compose, not automatically loaded by Go.
 
-Real-PostgreSQL tests cover durable submission, competing claims, locked-row skipping, bounded distributed concurrency, shutdown draining, atomic history rollback, migration backfill, lease renewal/recovery races, fencing against stale owners/tokens, retry limits and eligibility, timeouts (including noncooperative handlers), concurrent idempotency, and an actual killed worker process. Additional checks cover scheduled eligibility, cancellation races, the Python SDK, and the dashboard. The suite also checks queue eligibility metrics and committed outcomes during transient failures, cancellation, and fenced recovery. Benchmarks and CI remain deferred.
+Real-PostgreSQL tests cover durable submission, competing claims, locked-row skipping, bounded distributed concurrency, shutdown draining, atomic history rollback, migration backfill, lease renewal/recovery races, fencing against stale owners/tokens, retry limits and eligibility, timeouts (including noncooperative handlers), concurrent idempotency, and an actual killed worker process. Additional checks cover scheduled eligibility, cancellation races, the Python SDK, and the dashboard. The suite also checks queue eligibility metrics and committed outcomes during transient failures, cancellation, and fenced recovery. GitHub Actions runs the Go and PostgreSQL suites, the SDK tests, the mock and live dashboard checks, a k6 smoke run, and the five-worker Compose fault scenario.
+
+### Release checks
+
+The CI workflow runs on pushes to `main`, pull requests, and manual dispatch. It checks formatting and generated SQL bindings, compiles and vets Go code, runs unit and race tests, exercises real PostgreSQL, and verifies the SDK and dashboard. The Compose job checks k6 acceptance and recovery correctness. Run the full 5- and 10-worker benchmark on a controlled host when recording performance for a release. [CI workflow](.github/workflows/ci.yml) · [Benchmark procedure](docs/benchmarks.md)
+
+Before tagging an MVP release, check the workflow on the release commit, reproduce the load and failure reports, and smoke-test a fresh Compose install and the live dashboard. Back up existing data before any upgrade that requires migrations. See the reliability contracts below for lease, retry, and recovery behavior.
 
 ### Metrics and logs
 
@@ -335,40 +343,27 @@ The normal Playwright suite isolates loading, empty, and error responses, pagina
 | `workers` | Worker registration, heartbeats, and health |
 | `idempotency_keys` | Deduplicated submission keys linked to jobs |
 
-Planned `jobs` fields: `id`, `task_type`, `payload`, `status`, `created_at`, `scheduled_at`, `started_at`, `completed_at`, `attempt_count`, `max_retries`, `timeout_seconds`, `next_run_at`, `cancel_requested_at`, `lease_owner`, `lease_expires_at`, `fencing_token`, `result`, and `last_error`.
+The `jobs` table stores `id`, `task_type`, `payload`, `status`, `created_at`, `scheduled_at`, `started_at`, `completed_at`, `attempt_count`, `retry_start`, `max_retries`, `timeout_seconds`, `next_run_at`, `cancel_requested_at`, `lease_owner`, `lease_expires_at`, `fencing_token`, `result`, and `last_error`.
 
-Indexes will support job eligibility and scheduling, lease expiration, and status queries. Status transitions must be explicit and transactionally enforced. Separate attempt records preserve earlier outcomes when a job retries.
+Partial indexes support claim eligibility and expired leases. An ordered index supports the job list. Row locks and database constraints enforce lifecycle transitions. Separate attempt records preserve earlier outcomes when a job retries.
 
-## Planned repository layout
+## Repository layout
 
 ```text
-cmd/
-  api/
-  worker/
-  scheduler/
-internal/
-  api/
-  jobs/
-  queue/
-  worker/
-  scheduler/
-  recovery/
-  store/
-  tasks/
-  metrics/
-migrations/
-sdk/python/
-web/
-tests/
-  integration/
-  reliability/
-  load/
-deploy/docker/
-docs/
-docker-compose.yml
-README.md
-CLAUDE.md
-AGENTS.md
+cmd/api/                 HTTP API
+cmd/worker/              Worker process
+internal/                API, configuration, job types, tasks, storage, workers, metrics
+migrations/              Versioned PostgreSQL schema
+queries/                 sqlc query sources
+sdk/python/              Python client
+web/                     Operator dashboard
+tests/integration/       PostgreSQL integration suite
+tests/reliability/       Compose crash and recovery scenario
+tests/load/              k6 workload and benchmark runner
+deploy/prometheus/       Scrape configuration
+docs/                    Architecture and measured results
+.github/workflows/       GitHub Actions CI
+docker-compose.yml       Local stack
 ```
 
 ## Development roadmap
@@ -378,7 +373,7 @@ AGENTS.md
 3. **Reliability and recovery (implemented):** Renewable leases, heartbeats, fencing, automatic recovery, bounded retries/backoff, cooperative timeouts, idempotent submission, dead letters, and manual retry. PostgreSQL and process/Compose checks cover recovery and preserved history.
 4. **Developer experience (implemented):** Scheduling, cancellation, REST operator endpoints, Python SDK, and React dashboard for operating jobs through the API.
 5. **Observability and fault testing (implemented):** Prometheus metrics, correlated transition logs, PostgreSQL fault tests, and a reproducible five-worker Compose check.
-6. **Benchmarking and release:** Measure throughput and latency, optimize observed bottlenecks, add CI pipelines, and document architecture and measured results.
+6. **Benchmarking and release (implemented):** Added the k6 workload, measured scaling and recovery, documented worker concurrency tuning, and added CI and release documentation.
 
 ## Reliability and performance validation
 
@@ -393,7 +388,7 @@ Track queue latency, throughput, retry rates, recovery time, and scaling as work
 | Lost accepted jobs | 0 |
 | Recovery time | Under 30 seconds |
 
-These are targets, not achieved results. Throughput depends on workload and hardware; recovery depends on lease duration and detection intervals. Accepted jobs must remain accounted for even when duplicate execution occurs.
+Throughput depends on workload and hardware. Recovery depends on lease duration and detection intervals. See the measured results, workload, and reproduction commands. [Benchmark report](docs/benchmarks.md)
 
 ### Definition of done
 

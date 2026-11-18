@@ -6,7 +6,7 @@ JobFlow is a distributed job execution engine planned in Go and PostgreSQL. Corr
 
 Read [README.md](README.md) for scope, architecture, roadmap, and MVP acceptance criteria, and [CLAUDE.md](CLAUDE.md) for detailed implementation guidance. This file defines the development and review workflow.
 
-Milestones 1–4 have Go entry points under `cmd/api` and `cmd/worker`, backend packages under `internal/`, schema changes under `migrations/`, sqlc source queries under `queries/`, and real PostgreSQL tests under `tests/integration/`. Docker Compose provides local PostgreSQL, explicit migrations, API, and three independent workers with configurable local concurrency. Attempt histories are committed atomically with claims and outcomes. Renewable fenced leases, recovery, retries, timeouts, idempotency, dead letters, and manual retry are implemented. Milestone 5 adds Prometheus scrape endpoints, structured transition logs, and expanded PostgreSQL and Compose fault checks. The Python SDK lives in `sdk/python/` and the operator dashboard in `web/`. Load tests and CI remain planned.
+Milestones 1–4 have Go entry points under `cmd/api` and `cmd/worker`, backend packages under `internal/`, schema changes under `migrations/`, sqlc source queries under `queries/`, and real PostgreSQL tests under `tests/integration/`. Docker Compose provides local PostgreSQL, explicit migrations, API, and three independent workers with configurable local concurrency. Attempt histories are committed atomically with claims and outcomes. Renewable fenced leases, recovery, retries, timeouts, idempotency, dead letters, and manual retry are implemented. Milestone 5 adds Prometheus scrape endpoints, structured transition logs, and expanded PostgreSQL and Compose fault checks. The Python SDK lives in `sdk/python/` and the operator dashboard in `web/`. Milestone 6 adds a k6 benchmark, GitHub Actions checks, architecture documentation, and measured results.
 
 ## Agent roles
 
@@ -86,7 +86,7 @@ Prefer integration tests using real PostgreSQL transactions for distributed coor
 
 ## Testing and available commands
 
-The Go module, Makefile, Docker Compose, migrations, and integration harness are established. See the README for setup. `make generate` regenerates checked-in sqlc code. Do not present pending frontend, load, or CI commands as working checks.
+The Go module, Makefile, Docker Compose, migrations, and integration harness are established. See the README for setup. `make generate` regenerates checked-in sqlc code. Use the documented commands for each component.
 
 Use the checks relevant to changed code once the corresponding infrastructure exists:
 
@@ -99,8 +99,8 @@ Use the checks relevant to changed code once the corresponding infrastructure ex
 | Targeted worker crash and lease-expiration tests | PostgreSQL integration suite (including killed subprocess); `python3 tests/reliability/compose_recovery.py` for an isolated five-worker scenario |
 | Frontend lint, type checking, build, and tests | In `web/`, use `npm run lint`, `npm run typecheck`, `npm run build`, and `npm test`. Set `JOBFLOW_E2E_URL` to run the live test against Compose. |
 | Python SDK | With the SDK installed, run `python -m unittest discover -s sdk/python/tests -v` |
-| Load tests and benchmarks | Pending application and k6 harness setup |
-| Broader automated regression checks | Run unit/race and PostgreSQL integration suites; CI pending |
+| Load tests and benchmarks | `python3 tests/load/benchmark.py`; private Compose projects, k6 submission checks, and durable result accounting |
+| Broader automated regression checks | GitHub Actions runs Go, PostgreSQL, SDK, dashboard, and Compose checks |
 
 For documentation changes, available Git checks include `git diff --check` for whitespace errors and `git diff -- <file>` to inspect tracked edits. Newly created files must also be inspected directly because unstaged, untracked files do not appear in a normal Git diff.
 
