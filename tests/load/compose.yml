@@ -1,0 +1,9 @@
+services:
+  postgres:
+    ports: !reset []
+  api:
+    ports: !reset []
+  k6:
+    image: grafana/k6:1.4.2
+    volumes:
+      - ./tests/load/submit.js:/bench/submit.js:ro

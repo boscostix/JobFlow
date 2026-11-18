@@ -82,15 +82,21 @@ wait_for(lambda: sql("SELECT count(*) FROM pg_stat_activity WHERE wait_event='Pg
 owners = sql("SELECT DISTINCT a.worker_id FROM job_attempts a JOIN jobs j ON j.id=a.job_id WHERE j.payload->>'a'='-999'").splitlines()
 assert len(owners) == 2, owners
 killed = []
+kill_started = None
 for container in compose("ps", "-q", "worker").splitlines():
     logs = subprocess.check_output(["docker", "logs", container], stderr=subprocess.STDOUT, text=True)
     starts = [json.loads(line) for line in logs.splitlines() if '"msg":"worker starting"' in line]
     assert len(starts) == 1, starts
     if starts[0]["worker_id"] in owners:
+        if kill_started is None:
+            kill_started = time.monotonic()
         subprocess.check_call(["docker", "kill", container], stdout=subprocess.DEVNULL)
         killed.append(container)
 assert len(killed) == 2
 sql("DROP TRIGGER crash_window ON job_attempts; DROP FUNCTION crash_window();")
+wait_for(lambda: sql("SELECT count(*) FROM jobs WHERE payload->>'a'='-999' AND "
+                     "status='COMPLETED' AND attempt_count=2") == "2", "both recovered jobs to complete")
+recovery_seconds = time.monotonic() - kill_started
 wait_for(lambda: sql("SELECT count(*) FROM jobs WHERE status IN ('COMPLETED','DEAD_LETTER')") == str(TOTAL),
          "recovery and drain")
 
@@ -142,6 +148,7 @@ assert sql("SELECT count(*) FROM jobs j JOIN job_attempts a ON a.job_id=j.id AND
 wait_for(lambda: int(sql("SELECT count(*) FROM workers WHERE heartbeat_at>clock_timestamp()-interval '2 seconds'")) == 5, "five fresh heartbeats")
 print(json.dumps({"project": PROJECT, "accepted": TOTAL, "completed": SUCCESSFUL, "dead_lettered": 1,
                   "attempts": TOTAL + 3,
-                  "crashed_workers": 2, "recovered_jobs": 2, "fresh_workers": 5}))
+                  "crashed_workers": 2, "recovered_jobs": 2, "recovery_seconds": round(recovery_seconds, 3),
+                  "fresh_workers": 5}))
 print("Inspect with: docker compose -p " + PROJECT + " logs worker")
 print("Cleanup (retains volume): docker compose -p " + PROJECT + " down")
