@@ -531,6 +531,24 @@ func (q *Queries) ManualRetry(ctx context.Context, id string) (Job, error) {
 	return i, err
 }
 
+const queueDepth = `-- name: QueueDepth :one
+SELECT count(*) FILTER (WHERE next_run_at <= statement_timestamp()) AS eligible,
+ count(*) FILTER (WHERE next_run_at > statement_timestamp()) AS delayed
+FROM jobs WHERE status='QUEUED'
+`
+
+type QueueDepthRow struct {
+	Eligible int64 `json:"eligible"`
+	Delayed  int64 `json:"delayed"`
+}
+
+func (q *Queries) QueueDepth(ctx context.Context) (QueueDepthRow, error) {
+	row := q.db.QueryRow(ctx, queueDepth)
+	var i QueueDepthRow
+	err := row.Scan(&i.Eligible, &i.Delayed)
+	return i, err
+}
+
 const renewLease = `-- name: RenewLease :execrows
 UPDATE jobs SET lease_expires_at=clock_timestamp()+$2::bigint * interval '1 millisecond'
 WHERE id=$1 AND status='RUNNING' AND lease_owner=$3 AND fencing_token=$4 AND lease_expires_at>clock_timestamp()

@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	mathrand "math/rand/v2"
 	"time"
 
 	"github.com/boscostix/JobFlow/internal/jobs"
+	"github.com/boscostix/JobFlow/internal/metrics"
 	"github.com/boscostix/JobFlow/internal/store/db"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -23,11 +25,13 @@ type Store struct {
 	pool    *pgxpool.Pool
 	queries *db.Queries
 	lease   time.Duration
+	log     *slog.Logger
+	metrics *metrics.Worker
 }
 
 func New(pool *pgxpool.Pool) *Store { return NewWithLease(pool, DefaultLease) }
 func NewWithLease(pool *pgxpool.Pool, lease time.Duration) *Store {
-	return &Store{pool, db.New(pool), lease}
+	return &Store{pool: pool, queries: db.New(pool), lease: lease}
 }
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 func text(s string) pgtype.Text                 { return pgtype.Text{String: s, Valid: true} }
@@ -80,6 +84,9 @@ func (s *Store) Submit(ctx context.Context, task string, payload json.RawMessage
 	if err := tx.Commit(ctx); err != nil {
 		return jobs.Job{}, err
 	}
+	if s.log != nil {
+		s.jobLogger(j).Info("job submitted")
+	}
 	return convert(j), nil
 }
 func (s *Store) Get(ctx context.Context, id string) (jobs.Job, error) {
@@ -116,6 +123,9 @@ func (s *Store) Claim(ctx context.Context, workerID string) (jobs.Job, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return jobs.Job{}, err
 	}
+	if s.metrics != nil {
+		s.metrics.Claim(j.StartedAt.Time.Sub(j.NextRunAt.Time))
+	}
 	return convert(j), nil
 }
 
@@ -136,12 +146,12 @@ func (s *Store) Complete(ctx context.Context, j jobs.Job, result json.RawMessage
 	if !json.Valid(result) {
 		return fmt.Errorf("handler result must be valid JSON")
 	}
-	return s.finish(ctx, j, result, "", false)
+	return s.finish(ctx, j, result, "")
 }
 func (s *Store) Fail(ctx context.Context, j jobs.Job, message string) error {
-	return s.finish(ctx, j, nil, message, false)
+	return s.finish(ctx, j, nil, message)
 }
-func (s *Store) finish(ctx context.Context, owned jobs.Job, result json.RawMessage, message string, expired bool) error {
+func (s *Store) finish(ctx context.Context, owned jobs.Job, result json.RawMessage, message string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -158,12 +168,17 @@ func (s *Store) finish(ctx context.Context, owned jobs.Job, result json.RawMessa
 	if j.Status != "RUNNING" || j.LeaseOwner.String != owned.LeaseOwner || j.FencingToken != owned.FencingToken {
 		return jobs.ErrInvalidTransition
 	}
-	if err = s.finishLocked(ctx, q, j, result, message, expired); err != nil {
+	status, delay, err := s.finishLocked(ctx, q, j, result, message, false)
+	if err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.finished(j, status, delay, false)
+	return nil
 }
-func (s *Store) finishLocked(ctx context.Context, q *db.Queries, j db.Job, result json.RawMessage, message string, expired bool) error {
+func (s *Store) finishLocked(ctx context.Context, q *db.Queries, j db.Job, result json.RawMessage, message string, expired bool) (string, time.Duration, error) {
 	status, attemptStatus := "COMPLETED", "COMPLETED"
 	var lastError pgtype.Text
 	var delay time.Duration
@@ -180,19 +195,19 @@ func (s *Store) finishLocked(ctx context.Context, q *db.Queries, j db.Job, resul
 	}
 	n, err := q.FinishJob(ctx, db.FinishJobParams{ID: j.ID, Owner: j.LeaseOwner, Token: j.FencingToken, NewStatus: status, Result: result, LastError: lastError, DelayMs: delay.Milliseconds(), Expired: expired})
 	if err != nil {
-		return err
+		return "", 0, err
 	}
 	if n != 1 {
-		return jobs.ErrInvalidTransition
+		return "", 0, jobs.ErrInvalidTransition
 	}
 	n, err = q.FinishAttempt(ctx, db.FinishAttemptParams{JobID: j.ID, FencingToken: j.FencingToken, Status: attemptStatus, Result: result, LastError: lastError})
 	if err != nil {
-		return err
+		return "", 0, err
 	}
 	if n != 1 {
-		return jobs.ErrInvalidTransition
+		return "", 0, jobs.ErrInvalidTransition
 	}
-	return nil
+	return status, delay, nil
 }
 
 // Lock first so lease validity is evaluated after any row-lock wait. An UPDATE
@@ -239,8 +254,10 @@ func (s *Store) Recover(ctx context.Context) error {
 			tx.Rollback(context.Background())
 			return nil
 		}
+		var status string
+		var delay time.Duration
 		if err == nil {
-			err = s.finishLocked(ctx, q, j, nil, "lease expired", true)
+			status, delay, err = s.finishLocked(ctx, q, j, nil, "lease expired", true)
 		}
 		if err == nil {
 			err = tx.Commit(ctx)
@@ -249,6 +266,7 @@ func (s *Store) Recover(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		s.finished(j, status, delay, true)
 	}
 	return nil
 }
@@ -260,6 +278,9 @@ func (s *Store) Retry(ctx context.Context, id string) (jobs.Job, error) {
 			return jobs.Job{}, e
 		}
 		return jobs.Job{}, jobs.ErrInvalidTransition
+	}
+	if err == nil && s.log != nil {
+		s.jobLogger(j).Info("job manually retried", "job_status", j.Status)
 	}
 	return convert(j), err
 }

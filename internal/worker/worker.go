@@ -113,12 +113,12 @@ func (w Worker) maintain(ctx context.Context) {
 	for {
 		opCtx, cancel := context.WithTimeout(ctx, w.LeaseDuration/3)
 		if err := s.Heartbeat(opCtx, w.ID); err != nil && ctx.Err() == nil {
-			w.Log.Error("heartbeat failed", "error", err)
+			w.Log.Error("heartbeat failed", "worker_id", w.ID, "error", err)
 		}
 		cancel()
 		opCtx, cancel = context.WithTimeout(ctx, w.LeaseDuration/3)
 		if err := s.Recover(opCtx); err != nil && ctx.Err() == nil {
-			w.Log.Error("recovery failed", "error", err)
+			w.Log.Error("recovery failed", "worker_id", w.ID, "error", err)
 		}
 		cancel()
 		select {
@@ -129,6 +129,7 @@ func (w Worker) maintain(ctx context.Context) {
 	}
 }
 func (w Worker) execute(ctx context.Context, j jobs.Job) error {
+	log := w.Log.With("worker_id", w.ID, "job_id", j.ID, "task_type", j.TaskType, "attempt_number", j.AttemptCount, "fencing_token", j.FencingToken)
 	timeout := time.Duration(j.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 300 * time.Second
@@ -141,6 +142,7 @@ func (w Worker) execute(ctx context.Context, j jobs.Job) error {
 	// deadline passes renewal stops, allowing another process to recover the job.
 	renewCtx, stopRenew := context.WithCancel(ctx)
 	renewed := make(chan struct{})
+	var renewalFailure error
 	go func() {
 		defer close(renewed)
 		s := w.Store
@@ -159,14 +161,17 @@ func (w Worker) execute(ctx context.Context, j jobs.Job) error {
 				err := s.Renew(opCtx, j)
 				done()
 				if err != nil {
-					cancel(err)
+					if renewCtx.Err() == nil {
+						cancel(err)
+						renewalFailure = err
+					}
 					return
 				}
 			}
 		}
 	}()
 
-	w.Log.Info("job started", "worker_id", w.ID, "job_id", j.ID, "task_type", j.TaskType)
+	log.Info("job claimed")
 	h, ok := w.Registry[j.TaskType]
 	var result json.RawMessage
 	var err error
@@ -175,14 +180,23 @@ func (w Worker) execute(ctx context.Context, j jobs.Job) error {
 	} else {
 		result, err = invoke(ctx, h, j.Payload)
 	}
-	if ctx.Err() != nil {
-		err = ctx.Err()
-		if errors.Is(context.Cause(ctx), jobs.ErrCancellationRequested) {
-			err = jobs.ErrCancellationRequested
-		}
-	}
+	executionErr, executionCause := ctx.Err(), context.Cause(ctx)
 	stopRenew()
 	<-renewed
+	if renewalFailure != nil && !errors.Is(renewalFailure, jobs.ErrCancellationRequested) {
+		// Persist the outcome before emitting diagnostics.
+		defer log.Warn("lease renewal failed", "error", renewalFailure)
+	}
+	// Use the handler's deadline at return, while still honoring a renewal
+	// failure that raced with the handler's return.
+	switch {
+	case errors.Is(executionCause, jobs.ErrCancellationRequested), errors.Is(renewalFailure, jobs.ErrCancellationRequested):
+		err = jobs.ErrCancellationRequested
+	case executionErr != nil:
+		err = executionErr
+	case renewalFailure != nil:
+		err = context.Canceled
+	}
 	if err == nil && !json.Valid(result) {
 		err = errors.New("handler returned invalid JSON")
 	}
@@ -191,19 +205,17 @@ func (w Worker) execute(ctx context.Context, j jobs.Job) error {
 	var saveErr error
 	if err != nil {
 		saveErr = w.Store.Fail(persistCtx, j, err.Error())
-		w.Log.Info("handler returned an error", "worker_id", w.ID, "job_id", j.ID, "error", err)
 	} else {
 		saveErr = w.Store.Complete(persistCtx, j, result)
-
 	}
 	if errors.Is(saveErr, jobs.ErrInvalidTransition) {
-		w.Log.Info("attempt no longer owns job", "job_id", j.ID, "fencing_token", j.FencingToken)
+		log.Info("attempt outcome rejected by fence")
 		return nil
 	}
 	if saveErr != nil {
+		log.Error("attempt outcome write failed", "error", saveErr)
 		return fmt.Errorf("persist outcome for %s (lease recovery will resolve abandoned state): %w", j.ID, saveErr)
 	}
-	w.Log.Info("attempt outcome persisted", "worker_id", w.ID, "job_id", j.ID, "fencing_token", j.FencingToken)
 	return nil
 }
 func invoke(ctx context.Context, h tasks.Handler, payload json.RawMessage) (result json.RawMessage, err error) {

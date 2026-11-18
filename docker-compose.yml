@@ -47,6 +47,7 @@ services:
     command: ["worker"]
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-jobflow}:${POSTGRES_PASSWORD:-jobflow}@postgres:5432/${POSTGRES_DB:-jobflow}?sslmode=disable
+      WORKER_METRICS_ADDR: :9091
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
       WORKER_LEASE_DURATION: ${WORKER_LEASE_DURATION:-10s}
       WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-250ms}

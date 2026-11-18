@@ -37,6 +37,9 @@ func (s *Store) Cancel(ctx context.Context, id string) (jobs.Job, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return jobs.Job{}, err
 	}
+	if s.log != nil {
+		s.jobLogger(j).Info("job cancellation recorded", "job_status", j.Status)
+	}
 	return convert(j), nil
 }
 

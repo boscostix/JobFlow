@@ -86,3 +86,8 @@ SELECT * FROM job_attempts WHERE job_id=$1 ORDER BY attempt_number;
 SELECT id,started_at,heartbeat_at,
  CASE WHEN heartbeat_at >= statement_timestamp()-interval '30 seconds' THEN 'ONLINE' ELSE 'STALE' END AS status
 FROM workers ORDER BY heartbeat_at DESC,id;
+
+-- name: QueueDepth :one
+SELECT count(*) FILTER (WHERE next_run_at <= statement_timestamp()) AS eligible,
+ count(*) FILTER (WHERE next_run_at > statement_timestamp()) AS delayed
+FROM jobs WHERE status='QUEUED';
