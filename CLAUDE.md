@@ -4,9 +4,9 @@
 
 JobFlow is a Go distributed job execution platform. Its core objective is durable submission, reliable distributed execution, and automatic recovery from worker crashes, transient failures, and service restarts.
 
-Read [README.md](README.md) for the MVP scope, planned API, data model, directory layout, roadmap, and definition of done. These documents summarize the supplied *JobFlow - Complete MVP Specification*.
+Read [README.md](README.md) for setup and usage. See [architecture](docs/architecture.md) for the design and [benchmarks](docs/benchmarks.md) for performance and recovery checks. These documents summarize the supplied *JobFlow - Complete MVP Specification*.
 
-Milestones 1–4 are implemented: API/worker executables, PostgreSQL migrations/sqlc, distributed bounded concurrency, atomic attempt histories, renewable fenced leases, worker heartbeats, automatic recovery, bounded jittered retries, cooperative execution timeouts, idempotent submission, dead letters, and manual retry. Compose defaults to three workers with four slots each. Scheduling, cancellation, operator REST endpoints, the Python SDK, and the React dashboard are available. Milestone 5 adds Prometheus metrics, structured transition logs, and expanded process/Compose reliability tests. See the README reliability contracts for defaults, transitions, idempotency retention/conflicts, timeout limitations, and upgrade requirements. Do not claim benchmark targets as measured performance. Follow [AGENTS.md](AGENTS.md) for bounded implementation and review.
+Milestones 1–4 are implemented: API/worker executables, PostgreSQL migrations/sqlc, distributed bounded concurrency, atomic attempt histories, renewable fenced leases, worker heartbeats, automatic recovery, bounded jittered retries, cooperative execution timeouts, idempotent submission, dead letters, and manual retry. Compose defaults to three workers with four slots each. Scheduling, cancellation, operator REST endpoints, the Python SDK, and the React dashboard are available. Milestone 5 adds Prometheus metrics, structured transition logs, and expanded process/Compose reliability tests. See the [operations guide](docs/operations.md) and [API reference](docs/api.md) for defaults, transitions, idempotency, timeout behavior, and upgrades. Do not claim benchmark targets as measured performance. Follow [AGENTS.md](AGENTS.md) for bounded implementation and review.
 
 ## Architecture and stack
 
@@ -64,7 +64,7 @@ Milestones 1–4 are implemented: API/worker executables, PostgreSQL migrations/
 
 ## Implementation order
 
-Build in the six milestones documented in the README:
+The implementation was organized into six milestones.
 
 1. Basic submission, storage, single-worker execution, and result retrieval.
 2. Distributed transactional claiming, bounded local concurrency, and attempt tracking.
@@ -90,7 +90,7 @@ Validate the complete Docker Compose scenario with five workers, terminate two d
 
 Measure queue latency, throughput, retry rates, recovery time, and scaling with increasing worker count. The initial targets are 10,000+ jobs/hour, 5-10 workers, zero lost accepted jobs, and recovery under 30 seconds. Report workload, hardware, and lease/detection configuration alongside measured results.
 
-Available checks: `make fmt`, `make build`, `make vet`, `make test`, `make race`, and `TEST_DATABASE_URL=... make integration`. Integration tests use isolated PostgreSQL schemas and require schema-creation permission; they do not truncate existing tables. `make generate` regenerates sqlc code. See the README for startup and migration commands. Run checks appropriate to each implemented change. Lease/crash reliability checks exist in the PostgreSQL integration suite and `tests/reliability/compose_recovery.py`; README documents the SDK and dashboard checks. Milestone 6 adds `python3 tests/load/benchmark.py` and GitHub Actions. See [benchmark methodology and results](docs/benchmarks.md) and [architecture](docs/architecture.md).
+Available checks: `make fmt`, `make build`, `make vet`, `make test`, `make race`, and `TEST_DATABASE_URL=... make integration`. Integration tests use isolated PostgreSQL schemas and require schema-creation permission; they do not truncate existing tables. `make generate` regenerates sqlc code. See the README for startup commands and the [operations guide](docs/operations.md) for migrations. Run checks appropriate to each implemented change. Lease/crash reliability checks exist in the PostgreSQL integration suite and `tests/reliability/compose_recovery.py`. [Development documentation](docs/development.md) covers the SDK and dashboard checks. Milestone 6 adds `python3 tests/load/benchmark.py` and GitHub Actions. See [benchmark methodology and results](docs/benchmarks.md) and [architecture](docs/architecture.md).
 
 ## Scope boundaries
 

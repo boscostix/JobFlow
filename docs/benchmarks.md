@@ -1,6 +1,6 @@
 # Benchmark and recovery results
 
-Milestone 6 follows sections 8, 10, and 12 of the original MVP specification. It calls for repeatable throughput and latency measurements at 5–10 workers, retry and recovery measurements under controlled faults, investigation of observed bottlenecks, automated regression checks, and architecture and release documentation.
+These benchmarks measure throughput and latency at five and ten workers, including the effect of worker concurrency. A separate fault scenario measures recovery after two worker crashes.
 
 ## Repeat the measurements
 

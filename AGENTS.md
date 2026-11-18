@@ -4,7 +4,7 @@
 
 JobFlow is a distributed job execution engine planned in Go and PostgreSQL. Correctness-critical areas include transactional job claiming, worker concurrency, leases, fencing tokens, retry scheduling, idempotency, and crash recovery.
 
-Read [README.md](README.md) for scope, architecture, roadmap, and MVP acceptance criteria, and [CLAUDE.md](CLAUDE.md) for detailed implementation guidance. This file defines the development and review workflow.
+Read [README.md](README.md) for setup and usage, and [CLAUDE.md](CLAUDE.md) for detailed implementation guidance. This file defines the development and review workflow.
 
 Milestones 1–4 have Go entry points under `cmd/api` and `cmd/worker`, backend packages under `internal/`, schema changes under `migrations/`, sqlc source queries under `queries/`, and real PostgreSQL tests under `tests/integration/`. Docker Compose provides local PostgreSQL, explicit migrations, API, and three independent workers with configurable local concurrency. Attempt histories are committed atomically with claims and outcomes. Renewable fenced leases, recovery, retries, timeouts, idempotency, dead letters, and manual retry are implemented. Milestone 5 adds Prometheus scrape endpoints, structured transition logs, and expanded PostgreSQL and Compose fault checks. The Python SDK lives in `sdk/python/` and the operator dashboard in `web/`. Milestone 6 adds a k6 benchmark, GitHub Actions checks, architecture documentation, and measured results.
 
@@ -86,7 +86,7 @@ Prefer integration tests using real PostgreSQL transactions for distributed coor
 
 ## Testing and available commands
 
-The Go module, Makefile, Docker Compose, migrations, and integration harness are established. See the README for setup. `make generate` regenerates checked-in sqlc code. Use the documented commands for each component.
+The Go module, Makefile, Docker Compose, migrations, and integration harness are established. See the README for setup and [developer checks](docs/development.md) for test commands. `make generate` regenerates checked-in sqlc code. Use the documented commands for each component.
 
 Use the checks relevant to changed code once the corresponding infrastructure exists:
 

@@ -32,4 +32,4 @@ flowchart LR
 | Worker heartbeats and operational metrics | Heartbeats show process freshness. PostgreSQL lease state establishes ownership. Worker metric counters are process-local and durable job history remains available across restarts. |
 | Explicit migrations | The deployment controls the schema version. Stop incompatible binaries before migration and preserve a backup for rollback. |
 
-See the [reliability contracts](../README.md#reliability-contracts) for defaults and failure behavior, and the [benchmark procedure](benchmarks.md) for the measured workload.
+See the [reliability contracts](operations.md#reliability-contracts) for defaults and failure behavior, and the [benchmark procedure](benchmarks.md) for the measured workload.
