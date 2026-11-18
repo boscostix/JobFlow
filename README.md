@@ -96,6 +96,7 @@ Queued jobs cancel immediately. For running jobs, the worker signals cancellatio
 
 ## Project resources
 
+- [How JobFlow works](docs/how-jobflow-works.md) · Job lifecycle, crash recovery, and worked examples
 - [Architecture and design decisions](docs/architecture.md)
 - [Development and testing](docs/development.md)
 - [Benchmarks and crash recovery](docs/benchmarks.md)
