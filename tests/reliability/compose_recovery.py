@@ -83,7 +83,8 @@ owners = sql("SELECT DISTINCT a.worker_id FROM job_attempts a JOIN jobs j ON j.i
 assert len(owners) == 2, owners
 killed = []
 kill_started = None
-for container in compose("ps", "-q", "worker").splitlines():
+workers = compose("ps", "-q", "worker").splitlines()
+for container in workers:
     logs = subprocess.check_output(["docker", "logs", container], stderr=subprocess.STDOUT, text=True)
     starts = [json.loads(line) for line in logs.splitlines() if '"msg":"worker starting"' in line]
     assert len(starts) == 1, starts
@@ -130,7 +131,11 @@ def worker_metrics_match(replicas):
 # The killed workers lost two observations of their initial committed claims.
 wait_for(lambda: worker_metrics_match(3), "committed metrics from the three surviving replicas", 10)
 assert queue_is(0)
-compose("up", "-d", "--scale", "worker=5", "worker")
+
+# Restart the killed containers directly so the three survivors retain their
+# process-local metrics regardless of how Compose reconciles the service.
+subprocess.check_call(["docker", "start", *killed], stdout=subprocess.DEVNULL)
+assert set(compose("ps", "-q", "worker").splitlines()) == set(workers)
 wait_for(lambda: worker_metrics_match(5), "five worker endpoints after restart with reset counters", 10)
 assert set(sql("SELECT id FROM jobs").splitlines()) == set(accepted)
 assert sql("SELECT count(*) FROM jobs WHERE status='COMPLETED'") == str(SUCCESSFUL)
@@ -145,7 +150,10 @@ assert sql("SELECT count(*) FROM jobs WHERE attempt_count=2") == "3"
 assert sql("SELECT count(*) FROM job_attempts") == str(TOTAL + 3)
 assert sql("SELECT count(*) FROM jobs j WHERE attempt_count<>(SELECT count(*) FROM job_attempts a WHERE a.job_id=j.id)") == "0"
 assert sql("SELECT count(*) FROM jobs j JOIN job_attempts a ON a.job_id=j.id AND a.attempt_number=j.attempt_count WHERE a.status<>CASE WHEN j.status='DEAD_LETTER' THEN 'FAILED' ELSE j.status END OR a.result IS DISTINCT FROM j.result OR a.last_error IS DISTINCT FROM j.last_error OR a.fencing_token<>j.fencing_token") == "0"
-wait_for(lambda: int(sql("SELECT count(*) FROM workers WHERE heartbeat_at>clock_timestamp()-interval '2 seconds'")) == 5, "five fresh heartbeats")
+# Each worker heartbeats roughly every 3.3 seconds and starts on its own phase.
+wait_for(lambda: int(sql("SELECT count(*) FROM workers WHERE heartbeat_at > "
+                         "clock_timestamp() - interval '5 seconds'")) == 5,
+         "five fresh heartbeats")
 print(json.dumps({"project": PROJECT, "accepted": TOTAL, "completed": SUCCESSFUL, "dead_lettered": 1,
                   "attempts": TOTAL + 3,
                   "crashed_workers": 2, "recovered_jobs": 2, "recovery_seconds": round(recovery_seconds, 3),
