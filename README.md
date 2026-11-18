@@ -2,7 +2,7 @@
 
 A fault-tolerant, horizontally scalable distributed job execution platform built in Go. JobFlow will let developers submit, schedule, execute, retry, and monitor asynchronous background tasks across multiple workers through a REST API and lightweight Python SDK.
 
-**Status: Milestones 1–4 implemented.** JobFlow supports durable submission, fenced leases and recovery, scheduling, cooperative cancellation, and operator workflows through the REST API, Python SDK, and dashboard. The roadmap lists the remaining metrics, benchmarking, and CI work.
+**Status: Milestones 1–5 implemented.** JobFlow supports durable submission, fenced leases and recovery, scheduling, cooperative cancellation, and operator workflows through the REST API, Python SDK, and dashboard. Prometheus metrics and structured logs support fault diagnosis. Benchmarking and CI remain on the roadmap.
 
 ## Run locally
 
@@ -56,7 +56,35 @@ SQL queries live in `queries/jobs.sql`; generated pgx code is checked into `inte
 
 For host processes, set `DATABASE_URL` and optionally `API_ADDR`, `WORKER_CONCURRENCY`, `WORKER_POLL_INTERVAL`, `WORKER_SHUTDOWN_TIMEOUT`, and `WORKER_LEASE_DURATION`, then use `go run ./cmd/api` and `go run ./cmd/worker` in separate terminals. Start more worker processes in additional terminals; each receives a random process-lifetime worker ID. The `.env` file is consumed by Compose, not automatically loaded by Go.
 
-Real-PostgreSQL tests cover durable submission, competing claims, locked-row skipping, bounded distributed concurrency, shutdown draining, atomic history rollback, migration backfill, lease renewal/recovery races, fencing against stale owners/tokens, retry limits and eligibility, timeouts (including noncooperative handlers), concurrent idempotency, and an actual killed worker process. Additional checks cover scheduled eligibility, cancellation races, the Python SDK, and the dashboard. Broad metrics, benchmarks, and CI remain deferred.
+Real-PostgreSQL tests cover durable submission, competing claims, locked-row skipping, bounded distributed concurrency, shutdown draining, atomic history rollback, migration backfill, lease renewal/recovery races, fencing against stale owners/tokens, retry limits and eligibility, timeouts (including noncooperative handlers), concurrent idempotency, and an actual killed worker process. Additional checks cover scheduled eligibility, cancellation races, the Python SDK, and the dashboard. The suite also checks queue eligibility metrics and committed outcomes during transient failures, cancellation, and fenced recovery. Benchmarks and CI remain deferred.
+
+### Metrics and logs
+
+The API exposes `GET /metrics` on its usual HTTP address. Each worker exposes `GET /metrics` on its own listener. Host processes default to `127.0.0.1:9091`. Give each local worker a distinct `WORKER_METRICS_ADDR` or set it to an empty value to disable its listener. Compose listens on port 9091 inside each worker container and leaves that port on the private Compose network. A worker continues executing if its metrics listener fails, and logs the listener error.
+
+| Metric | Process | Meaning |
+| --- | --- | --- |
+| `jobflow_queue_depth{eligibility}` | API | Gauge of persisted `QUEUED` jobs. `eligible` means `next_run_at <=` PostgreSQL time at query start. `delayed` includes future schedules and automatic retry backoff. A concurrently locked queued row can still appear in the gauge. |
+| `jobflow_queue_wait_seconds` | Worker | Histogram with one observation per committed claim, from the attempt's persisted `next_run_at` to its PostgreSQL `started_at`. Deliberate schedule delay and retry backoff are excluded. |
+| `jobflow_attempt_outcomes_total{outcome}` | Worker | One increment per committed attempt resolution. Values are `completed`, `failed`, and `cancelled`. `failed` includes both retries and dead letters. Queued cancellations have no attempt to count. |
+| `jobflow_automatic_retries_total{cause}` | Worker | Counts committed automatic requeues with cause `failure` (including timeouts) or `lease_expired`. Manual retry is recorded in logs. |
+| `jobflow_lease_recoveries_total` | Worker | Counts committed expired-lease resolutions, including requeues, dead letters, and cancellations. The recovering process records the recovery and its associated outcome. |
+
+The queue gauge is a database snapshot and survives process restarts. Scrape one API per database for queue depth, or deduplicate equivalent API replicas before aggregation. Each API permits one scrape at a time, using a separate connection pool and a two-second query deadline. A failed depth query fails the scrape. Worker counters and histogram buckets reset on process restart and can lose observations between scrapes or between commit and process death. Attempt history is the durable record. Sum per-worker rates after applying `rate()`, for example `sum by (outcome) (rate(jobflow_attempt_outcomes_total[5m]))`. Metric labels contain only the fixed values listed above.
+
+The supplied Prometheus configuration uses one API target and DNS discovery to scrape each worker IP independently. Run Prometheus on the Compose network. [Configuration file](deploy/prometheus/prometheus.yml) · [Prometheus DNS discovery](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#dns_sd_config)
+
+Use these commands for the default Compose project name `jobflow`.
+
+```sh
+curl -fsS http://localhost:8080/metrics
+docker compose exec --index 1 worker wget -qO- http://127.0.0.1:9091/metrics
+docker run --rm --network jobflow_default -p 127.0.0.1:9090:9090 \
+  -v "$PWD/deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+  prom/prometheus:v3.5.0
+```
+
+API and worker lifecycle logs are JSON. Filter by `job_id` and follow `attempt_number` and `fencing_token` across claims and retries. `worker_id` identifies the attempt owner where available, and `observer_worker_id` identifies the worker reporting the store event, including lease recovery by another worker. Committed outcomes include the resulting `job_status`. `QUEUED` with `retry_delay_ms` identifies an automatic retry. Cancellation logs distinguish a recorded request on a running job from a committed cancellation. Lease renewal failures, fenced outcomes, and outcome-write failures use separate events. Consult attempt history for persisted results and errors.
 
 ### Reliability contracts
 
@@ -105,7 +133,20 @@ python3 tests/reliability/compose_recovery.py
 RELIABILITY_PROJECT=jobflow-m3-rerun python3 tests/reliability/compose_recovery.py
 ```
 
-The Compose script requires Python 3 and Docker Compose. It builds a dedicated project, refuses existing containers or a nonempty jobs table, submits 1,000 jobs, restarts the API, starts five workers, kills two during deliberately delayed outcome transactions, removes its test-only database trigger, and verifies recovery, results, histories, and fresh heartbeats. It retains containers/volume for inspection and prints cleanup commands. On failure, inspect that project's logs and remove its trigger or stop its containers before rerunning with a fresh project. No production handler or binary has a fault-injection switch. `RELIABILITY_DB_PORT` and `RELIABILITY_API_PORT` override script ports. This is a correctness scenario, not a benchmark or dashboard validation.
+The Compose script builds a dedicated project and refuses existing project containers or a nonempty jobs table. It submits 2,001 jobs, restarts the API before starting workers, and checks the exact accepted IDs and the restored eligible queue depth. It starts five workers, kills two during deliberately delayed outcome transactions, removes the test-only database trigger, and checks every result, retry budget, attempt history, and the metrics from the surviving workers. It then restores five replicas and checks for fresh heartbeats. The script retains containers and the volume for inspection and prints the cleanup command. On failure, inspect that project's logs and remove its trigger or stop its containers before rerunning with a fresh project. The fault injection lives in the test harness. `RELIABILITY_DB_PORT` and `RELIABILITY_API_PORT` override script ports. The scenario checks correctness for a controlled workload.
+
+The PostgreSQL suite also kills a worker process while its handler is still executing, forces lease expiration, rejects stale writes after reclamation, and verifies that a transient handler failure waits for retry eligibility and succeeds on its next attempt.
+
+### Milestone 5 verification record
+
+Verified November 18, 2026.
+
+- SQL generation, Go formatting, build, vet, unit tests, and the race detector passed. The full PostgreSQL 17.6 integration suite passed normally and under the race detector. New tests verified eligible and delayed queue metrics, retries after transient handler failure, cancellation overriding a handler result, and the absence of committed outcome signals on rollback or stale writes.
+- The five-worker scenario preserved all 2,001 accepted IDs across API restart. It verified 2,000 correct results, one dead letter after exhausting its retry budget, exactly two recovered leases, 2,004 consistent attempts, the surviving workers' metrics, and five fresh heartbeats after worker restart.
+- Prometheus 3.5.0 validated the scrape configuration and discovered six healthy targets on the Compose network, one API and five independent workers.
+- Two independent review passes caught logging that could delay renewal or cancellation, a deadline race during renewal cleanup, and stale totals in the fault report. The fixes passed regression checks.
+
+The final verification project remains available for inspection. Its API listens on port 18088 and its PostgreSQL instance on port 55438. Stop it with `docker compose -p jobflow-m3-m5-acceptance down` to retain the volume. The controlled fault run measured job accounting and recovery correctness. Throughput and recovery time targets remain for Milestone 6.
 
 ### Milestone 4 verification record
 
@@ -212,7 +253,7 @@ The API and workers run as separate processes. Docker Compose runs the local sta
 | POST | `/api/v1/jobs/{id}/retry` | Request a new execution for a terminal failed job |
 | POST | `/api/v1/jobs/{id}/cancel` | Request cancellation |
 | GET | `/api/v1/workers` | Retrieve worker status |
-| GET | `/metrics` (planned) | Export Prometheus metrics |
+| GET | `/metrics` | Export Prometheus metrics |
 | GET | `/health` | Check API health |
 
 ### Scheduling and submission
@@ -336,7 +377,7 @@ AGENTS.md
 2. **Distributed concurrency (implemented):** Transactional claiming, multiple worker processes, bounded goroutine concurrency, and attempt tracking. PostgreSQL integration tests verify competing claims and consistent outcomes.
 3. **Reliability and recovery (implemented):** Renewable leases, heartbeats, fencing, automatic recovery, bounded retries/backoff, cooperative timeouts, idempotent submission, dead letters, and manual retry. PostgreSQL and process/Compose checks cover recovery and preserved history.
 4. **Developer experience (implemented):** Scheduling, cancellation, REST operator endpoints, Python SDK, and React dashboard for operating jobs through the API.
-5. **Observability and fault testing:** Add structured logs, Prometheus metrics, integration tests, and a reproducible fault-injection harness. Demonstrate recovery under controlled failures.
+5. **Observability and fault testing (implemented):** Prometheus metrics, correlated transition logs, PostgreSQL fault tests, and a reproducible five-worker Compose check.
 6. **Benchmarking and release:** Measure throughput and latency, optimize observed bottlenecks, add CI pipelines, and document architecture and measured results.
 
 ## Reliability and performance validation
