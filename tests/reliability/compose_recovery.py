@@ -4,6 +4,7 @@
 Creates a dedicated Compose project and retains its volume for inspection.
 Never targets the default development project. No production fault hooks.
 """
+from collections import Counter
 import json
 import os
 import subprocess
@@ -17,6 +18,8 @@ ENV = dict(os.environ, POSTGRES_PORT=os.environ.get("RELIABILITY_DB_PORT", "5543
            API_PORT=os.environ.get("RELIABILITY_API_PORT", "18081"),
            WORKER_CONCURRENCY="1", WORKER_LEASE_DURATION="10s", WORKER_POLL_INTERVAL="50ms")
 BASE = "http://127.0.0.1:" + ENV["API_PORT"]
+SUCCESSFUL = 2000
+TOTAL = SUCCESSFUL + 1
 
 
 def compose(*args):
@@ -37,22 +40,36 @@ def wait_for(predicate, description, timeout=60):
     raise RuntimeError("timed out: " + description)
 
 
+def queue_is(expected):
+    try:
+        with urllib.request.urlopen(BASE + "/metrics", timeout=4) as response:
+            lines = response.read().decode().splitlines()
+    except OSError:
+        return False
+    return (f'jobflow_queue_depth{{eligibility="eligible"}} {expected}' in lines and
+            'jobflow_queue_depth{eligibility="delayed"} 0' in lines)
+
+
 if compose("ps", "-aq"):
     raise SystemExit("Verification project already has containers; use a fresh project name.")
 compose("up", "--build", "-d", "api")
 if sql("SELECT count(*) FROM jobs") != "0":
     raise SystemExit("Verification volume contains jobs; use a fresh project name.")
+wait_for(lambda: queue_is(0), "API metrics ready")
 accepted = []
-for n in range(1000):
+for n in range(TOTAL):
     payload = {"a": -999, "b": 1000} if n < 2 else {"a": n, "b": 1}
-    body = json.dumps({"type": "add_numbers", "payload": payload, "max_retries": 2}).encode()
+    if n == SUCCESSFUL:
+        payload = {"a": 9223372036854775807, "b": 1}
+    body = json.dumps({"type": "add_numbers", "payload": payload, "max_retries": 1}).encode()
     req = urllib.request.Request(BASE + "/api/v1/jobs", body, {"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=10) as resp:
         assert resp.status == 202
         accepted.append(json.load(resp)["job_id"])
-assert len(set(accepted)) == 1000
+assert len(set(accepted)) == TOTAL
 compose("restart", "api")
-wait_for(lambda: sql("SELECT count(*) FROM jobs WHERE status='QUEUED'") == "1000", "durable queue")
+wait_for(lambda: queue_is(TOTAL), "API metrics report the persisted eligible queue after restart")
+assert set(sql("SELECT id FROM jobs WHERE status='QUEUED'").splitlines()) == set(accepted)
 # Delay outcome history persistence for exactly the two marker jobs. Killing
 # their workers rolls back the entire outcome transaction, then lease expiry
 # recovers them. Other jobs run normally. Drop the trigger before recovery.
@@ -74,19 +91,57 @@ for container in compose("ps", "-q", "worker").splitlines():
         killed.append(container)
 assert len(killed) == 2
 sql("DROP TRIGGER crash_window ON job_attempts; DROP FUNCTION crash_window();")
-wait_for(lambda: sql("SELECT count(*) FROM jobs WHERE status='COMPLETED'") == "1000", "recovery and drain")
+wait_for(lambda: sql("SELECT count(*) FROM jobs WHERE status IN ('COMPLETED','DEAD_LETTER')") == str(TOTAL),
+         "recovery and drain")
+
+
+def worker_metrics_match(replicas):
+    counts = Counter()
+    containers = compose("ps", "-q", "worker").splitlines()
+    if len(containers) != replicas:
+        return False
+    for container in containers:
+        scrape = subprocess.run(["docker", "exec", container, "wget", "-T", "4", "-qO-",
+                                 "http://127.0.0.1:9091/metrics"], capture_output=True, text=True)
+        if scrape.returncode:
+            return False
+        raw = scrape.stdout
+        for line in raw.splitlines():
+            if line.startswith("jobflow_"):
+                name, value = line.split()
+                counts[name] += float(value)
+    return {
+        "jobflow_queue_wait_seconds_count": TOTAL + 1,
+        'jobflow_attempt_outcomes_total{outcome="completed"}': SUCCESSFUL,
+        'jobflow_attempt_outcomes_total{outcome="failed"}': 4,
+        'jobflow_attempt_outcomes_total{outcome="cancelled"}': 0,
+        'jobflow_automatic_retries_total{cause="failure"}': 1,
+        'jobflow_automatic_retries_total{cause="lease_expired"}': 2,
+        "jobflow_lease_recoveries_total": 2,
+    }.items() <= counts.items()
+
+
+# The killed workers lost two observations of their initial committed claims.
+wait_for(lambda: worker_metrics_match(3), "committed metrics from the three surviving replicas", 10)
+assert queue_is(0)
 compose("up", "-d", "--scale", "worker=5", "worker")
-wait_for(lambda: len(compose("ps", "-q", "worker").splitlines()) == 5, "five restarted workers")
-assert sql("SELECT count(*) FROM jobs") == "1000"
-assert sql("SELECT count(*) FROM jobs WHERE result <> jsonb_build_object('sum',(payload->>'a')::bigint+(payload->>'b')::bigint)") == "0"
+wait_for(lambda: worker_metrics_match(5), "five worker endpoints after restart with reset counters", 10)
+assert set(sql("SELECT id FROM jobs").splitlines()) == set(accepted)
+assert sql("SELECT count(*) FROM jobs WHERE status='COMPLETED'") == str(SUCCESSFUL)
+assert sql("SELECT count(*) FROM jobs WHERE status='COMPLETED' AND result IS DISTINCT FROM "
+           "jsonb_build_object('sum',(payload->>'a')::numeric+(payload->>'b')::numeric)") == "0"
+assert sql("SELECT id FROM jobs WHERE status='DEAD_LETTER' AND attempt_count=2") == accepted[-1]
+assert sql("SELECT count(*) FROM job_attempts a JOIN jobs j ON j.id=a.job_id "
+           "WHERE j.status='DEAD_LETTER' AND a.status='FAILED' AND a.last_error LIKE '%overflow%'") == "2"
 assert sql("SELECT count(*) FROM job_attempts WHERE status='RUNNING'") == "0"
-assert sql("SELECT count(*) FROM job_attempts WHERE status='FAILED' AND last_error='lease expired'") == "2"
-assert sql("SELECT count(*) FROM jobs WHERE attempt_count=2") == "2"
-assert sql("SELECT count(*) FROM job_attempts") == "1002"
+assert set(sql("SELECT job_id FROM job_attempts WHERE status='FAILED' AND last_error='lease expired'").splitlines()) == set(accepted[:2])
+assert sql("SELECT count(*) FROM jobs WHERE attempt_count=2") == "3"
+assert sql("SELECT count(*) FROM job_attempts") == str(TOTAL + 3)
 assert sql("SELECT count(*) FROM jobs j WHERE attempt_count<>(SELECT count(*) FROM job_attempts a WHERE a.job_id=j.id)") == "0"
-assert sql("SELECT count(*) FROM jobs j JOIN job_attempts a ON a.job_id=j.id AND a.attempt_number=j.attempt_count WHERE a.status<>j.status OR a.result IS DISTINCT FROM j.result OR a.fencing_token<>j.fencing_token") == "0"
+assert sql("SELECT count(*) FROM jobs j JOIN job_attempts a ON a.job_id=j.id AND a.attempt_number=j.attempt_count WHERE a.status<>CASE WHEN j.status='DEAD_LETTER' THEN 'FAILED' ELSE j.status END OR a.result IS DISTINCT FROM j.result OR a.last_error IS DISTINCT FROM j.last_error OR a.fencing_token<>j.fencing_token") == "0"
 wait_for(lambda: int(sql("SELECT count(*) FROM workers WHERE heartbeat_at>clock_timestamp()-interval '2 seconds'")) == 5, "five fresh heartbeats")
-print(json.dumps({"project": PROJECT, "accepted": 1000, "completed": 1000, "attempts": 1002,
+print(json.dumps({"project": PROJECT, "accepted": TOTAL, "completed": SUCCESSFUL, "dead_lettered": 1,
+                  "attempts": TOTAL + 3,
                   "crashed_workers": 2, "recovered_jobs": 2, "fresh_workers": 5}))
 print("Inspect with: docker compose -p " + PROJECT + " logs worker")
 print("Cleanup (retains volume): docker compose -p " + PROJECT + " down")
